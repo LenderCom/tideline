@@ -1,0 +1,121 @@
+name: Release
+
+# A v* tag publishes @bydawn/tideline to npm with provenance and writes the release notes.
+# A manual run packs and runs `npm publish --dry-run`: nothing leaves CI, unless it is
+# dispatched on a v* tag with dry_run unticked (to re-run a tag's publish).
+#
+# Least privilege: `check` installs, tests, builds and packs with a read-only token and
+# no credential left in the checkout. `publish` and `release` run none of the package's
+# code: they take the tarball `check` packed and publish it with --ignore-scripts.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Pack and dry-run the publish without publishing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency: release
+
+env:
+  # Publish only for a pushed v* tag, or a dispatch on one with dry_run unticked.
+  PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)) }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ env.PUBLISH }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
+      - run: node scripts/reference-gate.mjs
+      - run: node scripts/license-gate.mjs
+      - name: The tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
+            exit 1
+          fi
+      - name: Pack
+        run: |
+          mkdir -p pack
+          npm pack --ignore-scripts --pack-destination pack
+      - name: Publish (dry run)
+        if: env.PUBLISH != 'true'
+        run: npm publish --dry-run --ignore-scripts --access public pack/*.tgz
+      - uses: actions/upload-artifact@v4
+        if: env.PUBLISH == 'true'
+        with:
+          name: package
+          path: pack/*.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The trusted publisher on npmjs.com names this environment, the environment deploys
+    # only from v* tags, and a tag ruleset lets only repo admins push v* tags, so a
+    # release.yml edited on a branch cannot publish unless an admin tags it.
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: pack
+      # No registry-url: setup-node would write an .npmrc with a placeholder token,
+      # and the publish must authenticate by OIDC alone.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: npm with trusted publishing (11.5.1 or later)
+        run: npm install --global --ignore-scripts npm@^11.5.1
+      # Trusted publishing: npm swaps this job's OIDC token for a one-run publish
+      # credential, so no npm token is stored anywhere. npmjs.com must name this repo,
+      # release.yml and the npm-publish environment as the package's trusted publisher,
+      # which needs the package to exist: a maintainer publishes its first version once
+      # by hand.
+      - name: Publish with provenance
+        run: npm publish --provenance --ignore-scripts --access public pack/*.tgz
+
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # the GitHub release
+    steps:
+      - name: Release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          at="$(TZ=UTC date +%H:%M)"
+          gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes \
+            --title "tideline ${GITHUB_REF_NAME}" \
+            --notes "Released ${at} UTC. What changed overnight: https://www.npmjs.com/package/@bydawn/tideline/v/${GITHUB_REF_NAME#v}"

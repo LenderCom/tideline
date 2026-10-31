@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security problem privately
+    url: https://github.com/LenderCom/tideline/security/advisories/new
+    about: Please don't file security problems as public issues.
+  - name: By Dawn open source
+    url: https://bydawn.com/open-source
+    about: Every package we publish, and what each one promises.

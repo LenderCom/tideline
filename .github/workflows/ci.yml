@@ -1,0 +1,32 @@
+name: CI
+
+# Every pull request runs the full suite, the build and both gates. Public repo, so
+# GitHub-hosted runners only, and no secrets in this workflow.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
+      - name: Reference gate
+        run: node scripts/reference-gate.mjs
+      - name: Licence gate
+        run: node scripts/license-gate.mjs
+      - name: The package packs
+        run: npm pack --dry-run

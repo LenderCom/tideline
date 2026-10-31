@@ -1,0 +1,16 @@
+name: An idea
+description: Something it could do, or do better.
+labels: [idea]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you're trying to do
+      description: Start with the problem, not the solution. What are you building, and where does tideline get in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you'd change
+      description: Optional. Check "What it won't do" in the README first; some limits are on purpose.
