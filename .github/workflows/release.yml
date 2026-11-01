@@ -62,7 +62,7 @@ jobs:
           npm pack --ignore-scripts --pack-destination pack
       - name: Publish (dry run)
         if: env.PUBLISH != 'true'
-        run: npm publish --dry-run --ignore-scripts --access public pack/*.tgz
+        run: npm publish --dry-run --ignore-scripts --access public ./pack/*.tgz
       - uses: actions/upload-artifact@v4
         if: env.PUBLISH == 'true'
         with:
@@ -101,7 +101,7 @@ jobs:
       # which needs the package to exist: a maintainer publishes its first version once
       # by hand.
       - name: Publish with provenance
-        run: npm publish --provenance --ignore-scripts --access public pack/*.tgz
+        run: npm publish --provenance --ignore-scripts --access public ./pack/*.tgz
 
   release:
     needs: publish
