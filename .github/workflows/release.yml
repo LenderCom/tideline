@@ -45,6 +45,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run test
+      - name: Gate tests
+        run: bun test scripts/
       - run: bun run build
       - run: node scripts/reference-gate.mjs
       - run: node scripts/license-gate.mjs
