@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { alternatives, judge, judgeId, violations } from './license-gate.mjs';
-import { allowlistProblems, binaryStrings, hash, lineHits, scan } from './reference-gate.mjs';
+import { allowlistProblems, binaryStrings, DENIED_SHAPES, hash, lineHits, scan } from './reference-gate.mjs';
 
 describe('the licence gate', () => {
   it('passes the licences it names, in any case, and judges a WITH exception by its base id', () => {
@@ -134,7 +134,29 @@ describe('the reference gate', () => {
     expect(lineHits('dawn-chorus-2', words)).toEqual(['dashed']);
     expect(lineHits('we heard the dawn chorus', words)).toEqual([]);
     expect(lineHits('dawn-choruses', words)).toEqual([]);
+    expect(lineHits(`${'x-'.repeat(50_000)}dawn-chorus-${'y-'.repeat(50_000)}z`, words)).toEqual(['dashed']);
     expect(lineHits('nothing to see here', words)).toEqual([]);
+  });
+
+  // The shape's held hash is real, so these read what it captures rather than whether it hits.
+  const repoShape = DENIED_SHAPES.find((s) => s.id === 'internal-repo');
+  const captures = (line) => [...line.matchAll(new RegExp(repoShape.shape, `${repoShape.flags ?? 'i'}g`))].map((m) => m[1].toLowerCase());
+
+  it('takes an owner/repo path as owner plus the first part of the repo name, behind any prefix', () => {
+    expect(captures('see github.com/Example/dawn-chorus')).toEqual(['example/dawn']);
+    expect(captures('clone x-example/dawn-chorus')).toEqual(['x-example/dawn', 'example/dawn']);
+    expect(captures('the -example/dawn-chorus job')).toEqual(['example/dawn']);
+    expect(captures('xexample/dawn-chorus')).toEqual(['xexample/dawn']);
+    expect(captures('example/dawn chorus')).toEqual([]);
+  });
+
+  it('scans a very long line in linear time', () => {
+    const runs = ['a'.repeat(200_000), `${'a'.repeat(100_000)}/${'b'.repeat(100_000)}`, 'a/'.repeat(100_000), 'ab-'.repeat(70_000), 'a-'.repeat(100_000)];
+    for (const line of runs) {
+      const start = performance.now();
+      lineHits(line, words);
+      expect(performance.now() - start).toBeLessThan(2_000);
+    }
   });
 
   it('reads the printable runs of six or more characters out of a binary file', () => {

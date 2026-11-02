@@ -59,7 +59,11 @@ export const DENIED_SHAPES = [
   // Scopes are case-sensitive on purpose: npm scopes are always lower case, while a GitHub team such as the CODEOWNERS
   // entry is written with capitals and is public.
   { id: 'private-scope', shape: '(@[a-z0-9-]+)/', flags: '', hashes: ['6f29fe2e11134f5f', '0af612c3fb238873'], fix: 'use the public @bydawn/ scope' },
-  { id: 'internal-repo', shape: '([a-z0-9-]+/[a-z0-9]+)-', hashes: ['20f08bd128d4edfb'], fix: 'name the public repository, or nothing' },
+  // An `owner/repo-…` path, as owner plus the repo name's first part. The match is a lookahead, so it consumes nothing:
+  // it is tried at the start of every run and after every dash in it, which finds the owner behind a dashed prefix
+  // (`x-owner/repo-`). Both parts are bounded (GitHub's own limits: 39 for an owner, 100 for a repo), so a very long
+  // run costs one bounded look per start, never a rescan to its end.
+  { id: 'internal-repo', shape: '(?<![a-z0-9])(?=([a-z0-9][a-z0-9-]{0,38}/[a-z0-9]{1,100})-)', hashes: ['20f08bd128d4edfb'], fix: 'name the public repository, or nothing' },
   { id: 'internal-email', shape: '@([a-z0-9-]+\\.[a-z]+)\\b', hashes: ['8076151cbbdfc2c6'], fix: 'use an example.com address' },
   { id: 'internal-host', shape: '\\.([a-z0-9-]+)\\.net\\b', hashes: ['d0715322452baa1b'], fix: 'use a placeholder host such as app.example.com' },
 ];
@@ -72,6 +76,13 @@ export const DENIED_PATTERNS = [
 export function hash(s) {
   return createHash('sha256').update(s).digest('hex').slice(0, 16);
 }
+
+/**
+ * The longest dashed name looked up, in characters (GitHub's limit for a repository name) and in parts. Every name kept
+ * out is far inside both, and they keep a very long dashed run linear rather than one lookup per pair of its parts.
+ */
+const MAX_DASHED = 100;
+const MAX_DASHED_PARTS = 8;
 
 const BY_HASH = new Map(Object.entries(DENIED_WORDS).map(([id, h]) => [h, id]));
 const MATCHERS = DENIED_PATTERNS.map((p) => ({ ...p, re: new RegExp(p.pattern, p.flags ?? 'i') }));
@@ -89,11 +100,16 @@ export function lineHits(line, byHash = BY_HASH) {
       if (two) ids.add(two);
     }
   }
-  for (const dashed of line.toLowerCase().match(/[a-z0-9]+(?:-[a-z0-9]+)+/g) ?? []) {
+  // A dashed run is matched only from its start (the lookbehind), so a long run is read once rather than from every
+  // character in it. Within it, every span of two or more parts is looked up, up to MAX_DASHED / MAX_DASHED_PARTS.
+  for (const dashed of line.toLowerCase().match(/(?<![a-z0-9])[a-z0-9]+(?:-[a-z0-9]+)+/g) ?? []) {
     const parts = dashed.split('-');
     for (let i = 0; i < parts.length; i++) {
-      for (let j = i + 2; j <= parts.length; j++) {
-        const id = byHash.get(hash(parts.slice(i, j).join('-')));
+      let span = parts[i];
+      for (let j = i + 1; j < parts.length && j - i < MAX_DASHED_PARTS; j++) {
+        span += `-${parts[j]}`;
+        if (span.length > MAX_DASHED) break;
+        const id = byHash.get(hash(span));
         if (id) ids.add(id);
       }
     }
