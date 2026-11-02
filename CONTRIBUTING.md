@@ -15,6 +15,7 @@ Thank you for wanting to help. tideline is small on purpose, and we'd like to ke
 ```sh
 bun install
 bun run test
+bun test scripts/
 bun run typecheck
 bun run build
 ```
