@@ -87,6 +87,7 @@ tideline reads and writes one markdown dialect, and it comes with an editor sche
 | An unterminated code fence | A closed one | It runs to the end of the page |
 | An indented code block | A fence | One code spelling |
 | Emphasis nested more than 32 deep | The markers past that depth, as literal characters | Whatever walks the tree stays within its stack |
+| Quotes, callouts and list items nested more than 32 deep, counted together | A `>`, list marker or `:::` past that depth, as text in a paragraph at the deepest level | The same: parsing and every walk of the tree stay within the stack |
 | Two adjacent lists of one kind | One list | Markdown cannot write them apart |
 | An escape nothing needs, such as `C:\\Users` or a lone `\*` | `C:\Users`, `*` | The writer escapes only what would read as markup |
 

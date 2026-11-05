@@ -16,6 +16,7 @@ import type { GrammarOptions } from './plugin.js';
  *  · `[text](#anchor)` links within the page.
  * A ```` ```mermaid ```` fence is a code block with that language; the codec opens it as a `mermaid` node. Front matter
  * at the very start of a body is a code block too, with the language `FRONT_MATTER_LANG`, so its text is kept verbatim.
+ * Quotes, callouts and list items nest `MAX_BLOCK_DEPTH` deep; a line that would open one more reads as text.
  */
 
 /** One inline run: the inline grammar's tokens, plus the ones only a page carries. */
@@ -62,6 +63,12 @@ const CALLOUT_CLOSE = /^ {0,3}:::\s*$/;
 const TASK_MARKER = /^\[( |x|X)\]\s+/;
 /** How far a line is indented to read as code, once it is not carrying on a paragraph. */
 const CODE_INDENT = 4;
+/**
+ * How many quotes, callouts and list items may enclose a block, so a pathological body cannot overflow the stack of
+ * whatever walks the tree, this parser first. The same depth the inline grammar allows emphasis. Inside that many, a line
+ * that would open one more reads as paragraph text where it stands: its `>`, list marker or `:::` is literal.
+ */
+export const MAX_BLOCK_DEPTH = 32;
 
 /** The language of the code block that holds a body's front matter. The codec writes it back between `---` lines. */
 export const FRONT_MATTER_LANG = 'front-matter';
@@ -85,7 +92,9 @@ const CALLOUT_KINDS: Readonly<Record<string, DocCalloutKind>> = {
  * the inline grammar unchanged.
  */
 const DOC_INLINE_SOURCE = [
-  '(`+)[^]*?\\1', // 1 a code span, re-read by the inline grammar
+  // 1 a code span, re-read by the inline grammar. Its run opens only as a whole, as there; a run that closes nothing is
+  // consumed whole too, so no backtick of it can open a span further on.
+  '(`+)(?:(?!`)[^]*?\\1)?',
   '!\\[([^\\]\\n]*)\\]\\(((?:attachment:[A-Za-z0-9_-]+)|https:\\/\\/[^\\s)]+)\\)', // 2 alt, 3 src
   '\\[\\[([^\\[\\]\\n|]+?)(?:\\|([^\\[\\]\\n]+?))?\\]\\]', // 4 target, 5 label
   '\\[([^\\[\\]\\n]+)\\]\\(#([A-Za-z0-9][A-Za-z0-9._-]*)\\)', // 6 text, 7 anchor
@@ -105,8 +114,8 @@ export function parseDocBody(body: string, options: GrammarOptions = {}): DocBlo
   const lines = body.replace(/\r\n?/g, '\n').split('\n');
   const ids = new Map<string, number>();
   const close = frontMatterEnd(lines);
-  if (close < 0) return parseBlocks(lines, ids, options);
-  return [{ kind: 'code', lang: FRONT_MATTER_LANG, text: lines.slice(1, close).join('\n') }, ...parseBlocks(lines.slice(close + 1), ids, options)];
+  if (close < 0) return parseBlocks(lines, ids, options, 0);
+  return [{ kind: 'code', lang: FRONT_MATTER_LANG, text: lines.slice(1, close).join('\n') }, ...parseBlocks(lines.slice(close + 1), ids, options, 0)];
 }
 
 /** The line that closes the front matter at the start of a body, or -1 when the body does not start with any. */
@@ -228,9 +237,15 @@ export function parseDocInline(text: string, options: GrammarOptions = {}): DocI
   return out;
 }
 
-function indentOf(line: string): number {
+/**
+ * How many columns a line is indented. Past `limit` the count stops, so the result is exact up to it and only says
+ * "deeper" beyond: a list compares every line under it with its own indent, and a deeply indented body would otherwise
+ * be rescanned in full at every level.
+ */
+function indentOf(line: string, limit = Infinity): number {
   let width = 0;
-  for (const char of line) {
+  for (let index = 0; index < line.length && width <= limit; index += 1) {
+    const char = line[index];
     if (char === ' ') width += 1;
     else if (char === '\t') width += 4 - (width % 4);
     else break;
@@ -253,11 +268,12 @@ function dedent(line: string, width: number): string {
 }
 
 /**
- * The block grammar. Every nested call parses a STRICTLY shorter slice of lines (a quote sheds its `>`, a callout its
- * fences, a list item its first line), so recursion is bounded however the body is shaped. `ids` is shared across the
- * whole page so two headings with the same text still get distinct anchors.
+ * The block grammar. `depth` is how many quotes, callouts and list items enclose these lines; at `MAX_BLOCK_DEPTH` none
+ * opens, so recursion is bounded however the body is shaped, and the lines a deeper level would have taken are copied
+ * no further. `ids` is shared across the whole page so two headings with the same text still get distinct anchors.
  */
-function parseBlocks(lines: string[], ids: Map<string, number>, options: GrammarOptions, inListItem = false): DocBlock[] {
+function parseBlocks(lines: string[], ids: Map<string, number>, options: GrammarOptions, depth: number, inListItem = false): DocBlock[] {
+  const nests = depth < MAX_BLOCK_DEPTH;
   const blocks: DocBlock[] = [];
   let paragraph: string[] = [];
 
@@ -280,9 +296,9 @@ function parseBlocks(lines: string[], ids: Map<string, number>, options: Grammar
     // A list item's own lines are read leniently, as they were written by hand: a sub-list or fence indented too far is
     // still that, and the line right under the item carries on its paragraph.
     const lenient = inListItem && (index === 0 || LIST_ITEM.test(line) || FENCE_LINE.test(line));
-    if (paragraph.length === 0 && line.trim() !== '' && indentOf(line) >= CODE_INDENT && !lenient) {
+    if (paragraph.length === 0 && line.trim() !== '' && indentOf(line, CODE_INDENT) >= CODE_INDENT && !lenient) {
       const body: string[] = [];
-      while (index < lines.length && (lines[index].trim() === '' || indentOf(lines[index]) >= CODE_INDENT)) {
+      while (index < lines.length && (lines[index].trim() === '' || indentOf(lines[index], CODE_INDENT) >= CODE_INDENT)) {
         body.push(dedent(lines[index], CODE_INDENT));
         index += 1;
       }
@@ -311,7 +327,7 @@ function parseBlocks(lines: string[], ids: Map<string, number>, options: Grammar
       continue;
     }
 
-    const callout = CALLOUT_OPEN.exec(line);
+    const callout = nests ? CALLOUT_OPEN.exec(line) : null;
     if (callout) {
       flushParagraph();
       const inner: string[] = [];
@@ -326,7 +342,7 @@ function parseBlocks(lines: string[], ids: Map<string, number>, options: Grammar
         kind: 'callout',
         callout: CALLOUT_KINDS[callout[1].toLowerCase()] ?? 'note',
         ...(title ? { title } : {}),
-        blocks: parseBlocks(inner, ids, options),
+        blocks: parseBlocks(inner, ids, options, depth + 1),
       });
       continue;
     }
@@ -355,7 +371,7 @@ function parseBlocks(lines: string[], ids: Map<string, number>, options: Grammar
       continue;
     }
 
-    const quote = BLOCKQUOTE_LINE.exec(line);
+    const quote = nests ? BLOCKQUOTE_LINE.exec(line) : null;
     if (quote) {
       flushParagraph();
       const inner: string[] = [];
@@ -366,7 +382,7 @@ function parseBlocks(lines: string[], ids: Map<string, number>, options: Grammar
         index += 1;
       }
       index -= 1;
-      blocks.push({ kind: 'quote', blocks: parseBlocks(inner, ids, options) });
+      blocks.push({ kind: 'quote', blocks: parseBlocks(inner, ids, options, depth + 1) });
       continue;
     }
 
@@ -390,11 +406,11 @@ function parseBlocks(lines: string[], ids: Map<string, number>, options: Grammar
       continue;
     }
 
-    const item = LIST_ITEM.exec(line);
+    const item = nests ? LIST_ITEM.exec(line) : null;
     // A list item may interrupt a paragraph only when it is not indented under it (`  - x` inside prose stays prose).
-    if (item && (paragraph.length === 0 || indentOf(line) <= 3)) {
+    if (item && (paragraph.length === 0 || indentOf(line, 3) <= 3)) {
       flushParagraph();
-      index = parseList(lines, index, ids, blocks, options) - 1;
+      index = parseList(lines, index, ids, blocks, options, depth) - 1;
       continue;
     }
 
@@ -415,7 +431,7 @@ function parseBlocks(lines: string[], ids: Map<string, number>, options: Grammar
  * parsed as that item's own blocks, so a sub-list, a fence or a second paragraph nests. A blank line ends the list
  * unless the next line carries on inside it.
  */
-function parseList(lines: string[], start: number, ids: Map<string, number>, blocks: DocBlock[], options: GrammarOptions): number {
+function parseList(lines: string[], start: number, ids: Map<string, number>, blocks: DocBlock[], options: GrammarOptions, depth: number): number {
   const first = LIST_ITEM.exec(lines[start]);
   if (!first) return start + 1;
   const baseIndent = indentOf(first[1]);
@@ -425,7 +441,7 @@ function parseList(lines: string[], start: number, ids: Map<string, number>, blo
 
   while (index < lines.length) {
     const match = LIST_ITEM.exec(lines[index]);
-    if (!match || indentOf(match[1]) !== baseIndent || /\d/.test(match[2]) !== ordered) break;
+    if (!match || indentOf(match[1], baseIndent) !== baseIndent || /\d/.test(match[2]) !== ordered) break;
     const contentIndent = baseIndent + match[2].length + 1;
     const body: string[] = [];
     index += 1;
@@ -434,14 +450,14 @@ function parseList(lines: string[], start: number, ids: Map<string, number>, blo
       if (next.trim() === '') {
         // A blank line stays inside the item only when the item carries on after it.
         const after = lines.slice(index + 1).find((candidate) => candidate.trim() !== '');
-        if (after !== undefined && indentOf(after) > baseIndent) {
+        if (after !== undefined && indentOf(after, baseIndent) > baseIndent) {
           body.push('');
           index += 1;
           continue;
         }
         break;
       }
-      if (indentOf(next) <= baseIndent) break;
+      if (indentOf(next, baseIndent) <= baseIndent) break;
       body.push(dedent(next, contentIndent));
       index += 1;
     }
@@ -450,13 +466,13 @@ function parseList(lines: string[], start: number, ids: Map<string, number>, blo
     items.push({
       inline: parseDocInline(text, options),
       ...(task ? { checked: task[1] !== ' ' } : {}),
-      children: parseBlocks(body, ids, options, true),
+      children: parseBlocks(body, ids, options, depth + 1, true),
     });
     // A blank line between two items of the same list keeps the list going.
     if (index < lines.length && lines[index].trim() === '') {
       const resume = lines.slice(index).findIndex((candidate) => candidate.trim() !== '');
       const nextItem = resume >= 0 ? LIST_ITEM.exec(lines[index + resume]) : null;
-      if (nextItem && indentOf(nextItem[1]) === baseIndent && /\d/.test(nextItem[2]) === ordered) index += resume;
+      if (nextItem && indentOf(nextItem[1], baseIndent) === baseIndent && /\d/.test(nextItem[2]) === ordered) index += resume;
     }
   }
 

@@ -33,7 +33,7 @@ const AUTOLINK_SCHEME = 'https://';
  * The alternation the inline scanner walks, in precedence order: at each position, an earlier branch wins.
  *
  *  1. Inline code, matched by its own backtick run (``a ` b``). It comes first because a span inside code must never be
- *     re-read as markup.
+ *     re-read as markup. A run that no run of the same length closes is literal backticks, as in CommonMark.
  *  2. The plugins' tokens, in the order they were given.
  *  3. A `[[page]]` or `[[target|label]]` link, before the bracketed link that would otherwise read its `[`. Then a
  *     bracketed link, then a bare autolink, both https-only. A label may carry escaped punctuation (`\[`, `\]`), as
@@ -44,7 +44,11 @@ const AUTOLINK_SCHEME = 'https://';
  */
 function inlineSource(options: GrammarOptions): string {
   return [
-    '(?<fence>`+)(?<code>[^]*?)\\k<fence>',
+    // A backtick run opens a span only as a whole, so a code span is never empty: ``` `` ``` is no span, though `a``b`
+    // is two (the codec writes a long span as adjacent ones). It closes at the first run as long as its fence.
+    '(?<fence>`+)(?!`)(?<code>[^]*?)\\k<fence>',
+    // A backtick run that closes nothing reads as the backticks it is, all of it: none of it may open a span further on.
+    '(?<ticks>`+)',
     ...(options.plugins ?? []).map((plugin, index) => `(?<atom${index}>${plugin.pattern})`),
     '\\[\\[(?<target>[^\\[\\]\\n|]+?)(?:\\|(?<label>[^\\[\\]\\n]+?))?\\]\\]',
     '\\[(?<linkText>(?:\\\\[\\\\`*_{}\\[\\]()<>#+\\-.!|~:]|[^\\]\\\\\\n])+)\\]\\((?<href>https:\\/\\/[^\\s)]+)\\)',
@@ -266,6 +270,8 @@ export function parseInline(text: string, options: GrammarOptions = {}): Inline[
       items.push(run);
     } else if (groups.escaped !== undefined) {
       pushText(groups.escaped);
+    } else if (groups.ticks !== undefined) {
+      pushText(groups.ticks);
     }
   }
 

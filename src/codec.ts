@@ -534,7 +534,8 @@ function trimPieces(pieces: Piece[], trim: InlineOptions['trim']): Piece[] {
   }
   while (trim === 'both' && (out[out.length - 1]?.kind === 'break' || out[out.length - 1]?.kind === 'text')) {
     const last = out[out.length - 1];
-    if (last.kind === 'text') last.text = last.text.replace(/\s+$/, '');
+    // `trimEnd`, never `replace(/\s+$/)`: the regex retries at every space of an inner run, quadratic on a deep paragraph.
+    if (last.kind === 'text') last.text = last.text.trimEnd();
     if (last.kind === 'text' && last.text !== '') break;
     out.pop();
   }
@@ -1116,7 +1117,7 @@ function splitByDelimiters(pieces: readonly Formatted[]): Formatted[][] {
 function delimit(content: string, mark: 'bold' | 'italic', plugins: readonly MarkdownPlugin[], edges: SpanEdges = NO_EDGES): string {
   // Whitespace at a span's edges goes outside it: `* a *` at the start of a line would read as a list item.
   const lead = /^\s*/.exec(content)?.[0] ?? '';
-  const core = content.slice(lead.length).replace(/\s+$/, '');
+  const core = content.slice(lead.length).trimEnd();
   const trail = content.slice(lead.length + core.length);
   if (core === '') return content;
   const candidates = mark === 'bold' ? ['**', '__'] : ['_', '*'];
@@ -1400,7 +1401,7 @@ export function trimLeaves(run: readonly InlineLeaf[], trim: 'start' | 'both' | 
   }
   while (trim === 'both' && out[out.length - 1]?.kind === 'text') {
     const last = out[out.length - 1];
-    const text = (last.text ?? '').replace(/\s+$/, '');
+    const text = (last.text ?? '').trimEnd();
     if (text !== '') {
       last.text = text;
       break;

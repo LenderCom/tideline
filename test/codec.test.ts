@@ -277,7 +277,8 @@ describe('codec: whatever the editor hands it', () => {
     const inline = (...content: JSONContent[]): string => docToMarkdown(doc({ type: 'paragraph', content }));
     expect(inline(text('mail', [{ type: 'link', attrs: { href: 'mailto:a@b.c' } }]))).toBe('mail');
     expect(inline(text('[x]', [{ type: 'link', attrs: { href: '#a' } }]), text('`', [{ type: 'link', attrs: { href: '#a' } }]))).toBe('[x](#a)');
-    expect(inline(text('``', [{ type: 'link', attrs: { href: '#a' } }]))).toBe('\\`\\`');
+    // A run of backticks that closes nothing reads as itself, so it needs no escape.
+    expect(inline(text('``', [{ type: 'link', attrs: { href: '#a' } }]))).toBe('``');
     expect(inline(text('a', [{ type: 'link', attrs: { href: 'https://x.y' } }]), text('b', [{ type: 'link', attrs: { href: 'https://x.y' } }]))).toBe('[ab](https://x.y)');
     expect(inline({ type: 'mention', attrs: { id: 'not valid' } }, text('x'))).toBe('x');
     expect(inline({ type: 'pageLink', attrs: { target: '[]|' } }, { type: 'pageLink', attrs: { target: 'D28', label: 'D28' } })).toBe('[[D28]]');

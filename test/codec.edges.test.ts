@@ -33,6 +33,18 @@ describe('codec: reading', () => {
     expect(markdownToDoc('`a``b`').content?.[0].content).toEqual([{ type: 'text', text: 'ab', marks: [{ type: 'code' }] }]);
   });
 
+  it('reads a backtick run that nothing closes as backticks, never as an empty code span', () => {
+    // FC_SEED=7: dropping the backticks took the punctuation that let `*` open, and the italic was lost on the way back.
+    const body = 'alpha``*-*![alt](https://ex.am/i.png)';
+    const read = markdownToDoc(body);
+    expect(read.content?.[0].content?.slice(0, 2)).toEqual([
+      { type: 'text', text: 'alpha``' },
+      { type: 'text', text: '-', marks: [{ type: 'italic' }] },
+    ]);
+    expect(markdownToDoc(docToMarkdown(read))).toEqual(read);
+    expect(markdownToDoc('``x`').content?.[0].content).toEqual([{ type: 'text', text: '``x`' }]);
+  });
+
   it('reads an empty quote and an empty callout with a paragraph to type into', () => {
     expect(markdownToDoc('>').content).toEqual([{ type: 'blockquote', content: [{ type: 'paragraph' }] }]);
     expect(markdownToDoc(':::tip\n:::').content).toEqual([{ type: 'callout', attrs: { kind: 'tip', title: null }, content: [{ type: 'paragraph' }] }]);
@@ -364,6 +376,33 @@ describe('codec: emphasis past the depth cap', () => {
     const body = docToMarkdown(markdownToDoc(`${'*'.repeat(20_000)}a${'*'.repeat(20_000)}`));
     stable(body);
     expect(leaves(paragraphInline(body)).map((leaf) => leaf.text).join('').replace(/\*/g, '')).toBe('a');
+  });
+});
+
+/** Quotes, list items and callouts in turn, each inside the last, `levels` deep around one line of text. */
+function nestedMix(levels: number): string {
+  let lines = ['x'];
+  for (let level = levels - 1; level >= 0; level -= 1) {
+    if (level % 3 === 0) lines = lines.map((line) => `> ${line}`);
+    else if (level % 3 === 1) lines = [`- item ${level}`, ...lines.map((line) => `  ${line}`)];
+    else lines = [':::note', ...lines];
+  }
+  return lines.join('\n');
+}
+
+describe('codec: blocks past the depth cap', () => {
+  it.each([
+    ['quote', `${'> '.repeat(20_000)}x`],
+    ['callout', `${':::warning\n'.repeat(500)}x`],
+    ['list', Array.from({ length: 500 }, (_, level) => `${'  '.repeat(level)}- x`).join('\n')],
+    ['mix of all three', nestedMix(200)],
+  ])('reads a %s nested past the cap without throwing, and is stable after one pass', (_kind, source) => {
+    stable(docToMarkdown(markdownToDoc(source)));
+  });
+
+  it('writes the markers read as text past the cap so they read back as text', () => {
+    const page = markdownToDoc(`${'> '.repeat(40)}- x`);
+    expect(markdownToDoc(docToMarkdown(page))).toEqual(page);
   });
 });
 

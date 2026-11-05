@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { attachmentIdOf, docHeadings, docInlineText, headingSlug, mapDocInlines, type DocBlock, type DocInline } from '../src/parse.js';
+import { attachmentIdOf, docHeadings, docInlineText, headingSlug, mapDocInlines, MAX_BLOCK_DEPTH, type DocBlock, type DocInline } from '../src/parse.js';
 import { parseDocBody, parseDocInline } from './grammar.js';
 
 const mention = (id: string): DocInline => ({ kind: 'atom', type: 'mention', attrs: { id }, text: `<@${id}>` });
@@ -441,5 +441,72 @@ describe('parseDocBody: front matter', () => {
   it('is only a page\'s own: not inside a quote or a callout', () => {
     expect(parseDocBody('> ---\n> title: x\n> ---')[0]).toMatchObject({ kind: 'quote' });
     expect(JSON.stringify(parseDocBody(':::note\n---\ntitle: x\n---\n:::'))).not.toContain('front-matter');
+  });
+});
+
+describe('parseDocBody: block depth', () => {
+  /** How many quotes, callouts and list items enclose the deepest block, and that block. */
+  function deepest(blocks: readonly DocBlock[], depth = 0): { depth: number; block?: DocBlock } {
+    let best: { depth: number; block?: DocBlock } = { depth, block: blocks[0] };
+    for (const block of blocks) {
+      const inner =
+        block.kind === 'quote' || block.kind === 'callout'
+          ? [deepest(block.blocks, depth + 1)]
+          : block.kind === 'list'
+            ? block.items.map((item) => deepest(item.children.length > 0 ? item.children : [{ kind: 'paragraph', inline: item.inline, source: '' }], depth + 1))
+            : [];
+      for (const found of inner) if (found.depth > best.depth) best = found;
+    }
+    return best;
+  }
+  const textOf = (block: DocBlock | undefined): string => (block?.kind === 'paragraph' ? docInlineText(block.inline) : '');
+  const list = (levels: number, marker = '-'): string =>
+    Array.from({ length: levels }, (_, level) => `${' '.repeat((marker.length + 1) * level)}${marker} x${level}`).join('\n');
+
+  it('nests quotes as deep as the cap', () => {
+    const found = deepest(parseDocBody(`${'> '.repeat(MAX_BLOCK_DEPTH)}x`));
+    expect(found.depth).toBe(MAX_BLOCK_DEPTH);
+    expect(textOf(found.block)).toBe('x');
+  });
+
+  it('reads a quote marker past the cap as text where it stands', () => {
+    const found = deepest(parseDocBody(`${'> '.repeat(MAX_BLOCK_DEPTH + 2)}x`));
+    expect(found.depth).toBe(MAX_BLOCK_DEPTH);
+    expect(textOf(found.block)).toBe('> > x');
+  });
+
+  it('reads a list item past the cap as text, and its lines as one paragraph', () => {
+    const found = deepest(parseDocBody(list(MAX_BLOCK_DEPTH + 2)));
+    expect(found.depth).toBe(MAX_BLOCK_DEPTH);
+    expect(textOf(found.block)).toMatch(/^- x32\n\s+- x33$/);
+  });
+
+  it('reads a callout past the cap as text', () => {
+    const found = deepest(parseDocBody(`${':::tip\n'.repeat(MAX_BLOCK_DEPTH + 1)}x`));
+    expect(found.depth).toBe(MAX_BLOCK_DEPTH);
+    expect(textOf(found.block)).toBe(':::tip\nx');
+  });
+
+  it('counts quotes, callouts and list items together', () => {
+    // Quotes, list items and callouts in turn, each inside the last, around one line of text.
+    let lines = ['x'];
+    for (let level = MAX_BLOCK_DEPTH + 2; level >= 0; level -= 1) {
+      if (level % 3 === 0) lines = lines.map((line) => `> ${line}`);
+      else if (level % 3 === 1) lines = [`- item ${level}`, ...lines.map((line) => `  ${line}`)];
+      else lines = [':::note', ...lines];
+    }
+    expect(deepest(parseDocBody(lines.join('\n'))).depth).toBe(MAX_BLOCK_DEPTH);
+  });
+
+  it.each([
+    ['20000 quote markers on one line', `${'> '.repeat(20_000)}x`],
+    ['5000 lines each one quote deeper', Array.from({ length: 5000 }, (_, level) => `${'>'.repeat(level + 1)} x`).join('\n')],
+    ['5000 callouts opened and never closed', `${':::note\n'.repeat(5000)}x`],
+    ['a list indented 3000 levels', list(3000)],
+    ['an ordered list indented 3000 levels', list(3000, '1.')],
+  ])('parses %s without throwing, and quickly', (_shape, body) => {
+    const started = performance.now();
+    expect(deepest(parseDocBody(body)).depth).toBe(MAX_BLOCK_DEPTH);
+    expect(performance.now() - started).toBeLessThan(5000);
   });
 });
