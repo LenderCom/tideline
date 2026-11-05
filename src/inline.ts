@@ -167,12 +167,13 @@ const URL_TRAILING_PUNCTUATION = '.,;:!?';
 
 /**
  * Where the bare URL starting at `start` ends. A URL may hold `*` and `_`, but a run that would close a span waiting
- * around the URL closes it (`**https://a.b**`), so the URL stops there, and a run that closes nothing stays in it. The
- * walk goes no further than where it stops, so a line of such URLs stays linear. Trailing punctuation is the sentence's.
+ * around the URL closes it (`**https://a.b**`), so the URL stops there, and a run that closes nothing stays in it. An
+ * escaped marker, or one between backticks, is no closing marker. The walk goes no further than where it stops, so a line
+ * of such URLs stays linear. Trailing punctuation is the sentence's.
  * The end is right after the scheme when no URL is left.
  */
 function bareUrlEnd(text: string, start: number, closes: (run: string, at: number) => boolean): number {
-  const part = /\*+|_+|[^\s<>()[\]'"*_]+/y;
+  const part = /\\[*_]?|`[^\s<>()[\]'"`]*`|`|\*+|_+|[^\s<>()[\]'"*_\\`]+/y;
   const scheme = start + AUTOLINK_SCHEME.length;
   part.lastIndex = scheme;
   let end = scheme;

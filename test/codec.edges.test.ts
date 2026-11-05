@@ -203,7 +203,7 @@ describe('codec: a bare URL in emphasis', () => {
     expect(body(text('*a* '), link(url, 'bold'), text('y'))).toBe(`\\*a\\* **${url}**y`);
   });
 
-  it('writes one under `*`, and normalises the old `*` spelling once', () => {
+  it('normalises a bare URL under `*` to `_` once, and writes a bold one under `**`', () => {
     expect(docToMarkdown(markdownToDoc('*https://example.com/a*'))).toBe('_https://example.com/a_');
     const link = { type: 'text', text: 'https://example.com', marks: [{ type: 'link', attrs: { href: 'https://example.com' } }, { type: 'bold' }] };
     expect(docToMarkdown(doc(para(link)))).toBe('**https://example.com**');
@@ -246,6 +246,13 @@ describe('codec: marks no spelling can hold', () => {
     const linked = written(...unreadable, ...urls.flatMap((url) => [text(' and '), { ...text(url, 'bold'), marks: [{ type: 'bold' }, { type: 'link', attrs: { href: url } }] }]));
     expect(linked).toBe(`**a***b*c${urls.map((url) => ` and **${url}**`).join('')}`);
     stable(linked);
+  });
+
+  it('charges a spot for what touches it, so long paragraphs keep their marks', () => {
+    const filler = 'word (x) '.repeat(1100);
+    const paragraphs = Array.from({ length: 12 }, (_, index) => para(text(filler), ...unreadable, text(' '), text(`keep${index}`, 'bold')));
+    const body = docToMarkdown(doc(...paragraphs));
+    for (let index = 0; index < paragraphs.length; index += 1) expect(body).toContain(`**keep${index}**`);
   });
 
   it('keeps a bold phrase around an unreadable spot', () => {

@@ -22,7 +22,7 @@ import { tokenMatcher, type GrammarOptions, type MarkdownPlugin } from './plugin
  * What the editor can hold that the format cannot is normalised rather than lost silently, and each case is listed where
  * it is handled: a hard break at the end of a paragraph, whitespace before a paragraph's first word, a line in a code
  * block that would close its fence, two lists of the same kind back to back (the format reads them as one), a callout
- * nested in a callout, bold or italic on a code span or link text holding both `*` and `_`, bold or italic that CommonMark's
+ * nested in a callout, bold or italic on a code span or link text that runs across lines, bold or italic that CommonMark's
  * flanking rules cannot write where it sits (see `fitMarksToFlanking`), merged table cells, and bold or italic on a plugin's
  * atom (an inline atom holds no marks, because Yjs could not sync them: see `schema.ts`). A code
  * span that runs across lines is cut where one of its lines would read as a block, or as a blank line, so that the line
@@ -649,6 +649,17 @@ const MAX_MARK_ATTEMPTS = 16;
 const MARK_REPAIR_ALLOWANCE = 1_000_000;
 const READ_OVERHEAD = 32;
 
+/** A neighbour of a stretch, cut to the word that touches it: the rest of a long paragraph is not what a read there is for. */
+function nearestWord(piece: Piece, which: 'first' | 'last'): Piece {
+  if (piece.kind !== 'text') return piece;
+  const { text } = piece;
+  if (which === 'first') return { ...piece, text: /^\s*\S*/.exec(text)?.[0] ?? text };
+  let at = text.length;
+  while (at > 0 && isSpaceChar(text[at - 1])) at -= 1;
+  while (at > 0 && !isSpaceChar(text[at - 1])) at -= 1;
+  return { ...piece, text: text.slice(at) };
+}
+
 /** What is left of `MARK_REPAIR_ALLOWANCE` for the document being written. */
 interface MarkRepairs {
   left: number;
@@ -698,7 +709,6 @@ function readableMarks(pieces: Piece[], options: InlineOptions): Piece[] {
     return says(written, candidate);
   };
   const withoutMarks = (piece: Piece): Piece => (isFormatted(piece) ? { ...piece, bold: false, italic: false } : piece);
-  const isSpace = (piece: Piece): boolean => piece.kind === 'text' && piece.text.trim() === '';
   /** The run with each stretch at risk that does not read in this style given up a mark, or failing that all of them. */
   const givenUp = (run: readonly Piece[], style: InlineStyle, joined: (left: Piece, right: Piece) => boolean): Piece[] => {
     const out = [...run];
@@ -707,10 +717,10 @@ function readableMarks(pieces: Piece[], options: InlineOptions): Piece[] {
       const stretch = Array.from({ length: end - start }, (_, offset) => start + offset).filter((index) => atRisk(run, index));
       if (stretch.length === 0) continue;
       const from = Math.max(0, start - 1);
-      const beside = run.slice(from, end + 1);
+      const beside = run.slice(from, end + 1).map((piece, offset) => (from + offset < start ? nearestWord(piece, 'last') : from + offset >= end ? nearestWord(piece, 'first') : piece));
       const holds = (candidate: readonly Piece[]): boolean => repairs.left > 0 && paidRead(style, settled(candidate));
       if (holds(beside)) continue;
-      const attempts = (['italic', 'bold'] as const).flatMap((mark) => stretch.filter((index) => marked(run[index], mark) && !isSpace(run[index])).map((index) => ({ mark, index })));
+      const attempts = (['italic', 'bold'] as const).flatMap((mark) => stretch.filter((index) => marked(run[index], mark) && !isSpacePiece(run[index])).map((index) => ({ mark, index })));
       const fix = attempts
         .slice(0, MAX_MARK_ATTEMPTS)
         .find(({ mark, index }) => holds(beside.map((piece, offset) => (from + offset === index ? { ...piece, [mark]: false } : piece))));
@@ -750,12 +760,16 @@ function readableMarks(pieces: Piece[], options: InlineOptions): Piece[] {
  * span's edge it is unmarked. Two documents that differ only there read the same and must write the same bytes, or the
  * writer is not stable: `_a _b` and `_a_ b` would otherwise come back different.
  *
- * A code span or a link whose text neither delimiter survives (it holds both `*` and `_`) loses its bold or italic:
- * the format cannot mark it.
+ * A code span or a link whose text runs across lines loses its bold or italic: emphasis does not cross a line, so the
+ * format cannot mark it.
  */
 function canonicalPieces(plugins: readonly MarkdownPlugin[], pieces: readonly Piece[]): Piece[] {
   const marked = pieces.map((piece) => ((piece.kind === 'code' || piece.kind === 'link') && (piece.bold || piece.italic) ? { ...piece, ...markableAs(piece, plugins) } : piece));
   return settleMarks(shareWhitespaceMarks(marked));
+}
+
+function isSpacePiece(piece: Piece | undefined): boolean {
+  return piece?.kind === 'text' && piece.text.trim() === '';
 }
 
 /** Whitespace takes the marks shared by the content on both sides (see `canonicalPieces`). Text is split at whitespace to do it. */
@@ -763,13 +777,12 @@ function shareWhitespaceMarks(pieces: readonly Piece[]): Piece[] {
   const split = pieces.flatMap((piece): Piece[] => (piece.kind === 'text' ? piece.text.split(/(\s+)/).filter((text) => text !== '').map((text) => ({ ...piece, text })) : [piece]));
   const marksOf = (piece: Piece | undefined): { bold: boolean; italic: boolean } =>
     piece && isFormatted(piece) ? { bold: piece.bold, italic: piece.italic } : { bold: false, italic: false };
-  const isSpace = (piece: Piece | undefined): boolean => piece?.kind === 'text' && piece.text.trim() === '';
   return split.map((piece, index) => {
-    if (!isSpace(piece)) return piece;
+    if (!isSpacePiece(piece)) return piece;
     let before = index - 1;
-    while (before >= 0 && isSpace(split[before])) before -= 1;
+    while (before >= 0 && isSpacePiece(split[before])) before -= 1;
     let after = index + 1;
-    while (after < split.length && isSpace(split[after])) after += 1;
+    while (after < split.length && isSpacePiece(split[after])) after += 1;
     const left = marksOf(split[before]);
     const right = marksOf(split[after]);
     return { ...(piece as Formatted), bold: left.bold && right.bold, italic: left.italic && right.italic };
@@ -843,8 +856,8 @@ const TRAILING_PUNCTUATION = /\s*[\p{P}\p{S}]+$/u;
 /**
  * CommonMark cannot write every span: a marker between a word and punctuation is not a delimiter, so no spelling makes
  * `(b)` italic in `a(b)c`, or bold `Note:` directly before a word. Such a span gives up what it must for the text to stay
- * exactly as typed. Text at its edge gives up the punctuation (`a(_b_)c`), and a code span or link, which cannot be cut,
- * gives up the mark. Two marks starting or ending together are one run of `*` (`x***y***z`), so the character beside
+ * exactly as typed. Text at its edge gives up the punctuation (`a(_b_)c`), and a code span or bracketed link, which cannot
+ * be cut, gives up the mark. Two marks starting or ending together are one run of `*` (`x***y***z`), so the character beside
  * that run is what counts, and where it cannot work italic is given up first, as in `markableAs`.
  *
  * Checked with `*`, the more permissive marker: if it cannot work, `_` cannot.
@@ -895,7 +908,7 @@ function fitMarksToFlanking(pieces: Piece[]): Piece[] {
 
 /**
  * The marks a code span or link can actually carry: both if the pair wraps it and reads back, else italic is given up
- * first, then bold. Each mark alone may work where the pair does not (`` `__` `` takes `**` or `*`, not both).
+ * first, then bold. A span that runs across lines takes neither.
  */
 function markableAs(piece: Extract<Piece, { kind: 'code' | 'link' }>, plugins: readonly MarkdownPlugin[]): { bold: boolean; italic: boolean } {
   const span = piece.kind === 'code' ? codeSpan(piece.text, {}) : `[${piece.text.replace(FULL_ESCAPE, '\\$&')}](${piece.href})`;
@@ -1082,7 +1095,7 @@ function splitByDelimiters(pieces: readonly Formatted[]): Formatted[][] {
     if (piece.kind === 'text') for (const char of piece.text) push({ ...piece, text: char }, char === '*', char === '_');
     else if (piece.kind === 'atom') push(piece, piece.text.includes('*'), piece.text.includes('_'));
     else {
-      // A code span or link stands alone: its text can hold a delimiter run (`**`) that closes a span around it early.
+      // A code span or link is a part of its own, whatever it holds: a marker inside one is not a marker.
       if (parts[parts.length - 1].length > 0) parts.push([]);
       parts[parts.length - 1].push({ ...piece });
       parts.push([]);
