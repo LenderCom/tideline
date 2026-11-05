@@ -627,17 +627,21 @@ function writablePieces(nodes: readonly JSONContent[], options: InlineOptions): 
 }
 
 /**
- * How many marks `readableMarks` will try taking off, one at a time. One unreadable spot offers a few, and taking off one
- * mark cannot repair two spots. A run with more is written plain straight away, because each try reads the whole run again
- * in every style: a page of such spots (`https://a.b***y ******` repeated) would cost the square of its length, and this
- * runs on saw-collab's event loop.
+ * How many marks `readableMarks` will try taking off one word, one at a time. One unreadable spot needs only a few, and each
+ * try reads the word again, so a long chain of touching spans must not get a try per span: this can run on a server's event loop.
  */
-const MAX_MARK_ATTEMPTS = 5;
+const MAX_MARK_ATTEMPTS = 16;
 
 /**
  * The last resort for marks no spelling can hold, where neighbouring spans' delimiters run together into one marker that no
  * longer flanks (bold italic, then italic, then a word, all touching). Left alone the delimiters would read as literal
- * characters and change the text, so one piece gives up a mark, italic first, and failing that the run is written plain.
+ * characters and change the text, so one piece gives up a mark, italic first, and failing that its word is written plain.
+ * The rest of the run keeps its marks.
+ *
+ * Whitespace beside a marker settles how it flanks, so a spot is found by reading each word on its own with what touches it.
+ * Every try reads one word, not the whole run: a page of such spots (`https://a.b***y ******` repeated) stays linear. Each
+ * style is tried in full, as the run is written in one, and the run is read once more at the end, because spans can still
+ * pair across words. If no style holds, it is written plain.
  */
 function readableMarks(pieces: Piece[], options: InlineOptions): Piece[] {
   const marked = (piece: Piece, mark: 'bold' | 'italic'): boolean => isFormatted(piece) && piece[mark];
@@ -649,19 +653,43 @@ function readableMarks(pieces: Piece[], options: InlineOptions): Piece[] {
   if (!pieces.some(atRisk)) return pieces;
   // Read as a run, so a table's pipe escapes (the row reads those, before the cell) stay out of it.
   const asRun = { ...options, table: false };
-  const reads = (candidate: readonly Piece[]): boolean =>
-    STYLES.some((style) =>
-      sameLeaves(leaves(parseDocInline(renderSpans(candidate, style, asRun, 'bold'), { plugins: options.plugins ?? [] })), leaves(piecesToInline(candidate))),
-    );
+  const readsIn = (style: InlineStyle, candidate: readonly Piece[]): boolean =>
+    sameLeaves(leaves(parseDocInline(renderSpans(candidate, style, asRun, 'bold'), { plugins: options.plugins ?? [] })), leaves(piecesToInline(candidate)));
+  const reads = (candidate: readonly Piece[]): boolean => STYLES.some((style) => readsIn(style, candidate));
   if (reads(pieces)) return pieces;
-  const attempts = (['italic', 'bold'] as const).flatMap((mark) => pieces.flatMap((piece, index) => (marked(piece, mark) && atRisk(piece, index) ? [{ mark, index }] : [])));
-  if (attempts.length <= MAX_MARK_ATTEMPTS) {
-    for (const { mark, index } of attempts) {
-      const candidate = settleMarks(shareWhitespaceMarks(pieces.map((other, at) => (at === index ? { ...other, [mark]: false } : other))));
-      if (reads(candidate)) return candidate;
+  const settled = (candidate: readonly Piece[]): Piece[] => settleMarks(shareWhitespaceMarks(candidate));
+  const withoutMarks = (piece: Piece): Piece => (isFormatted(piece) ? { ...piece, bold: false, italic: false } : piece);
+  const sameWord = (left: Piece, right: Piece): boolean => anyMark(left) && anyMark(right) && !isSpaceChar(edgeChars(left).last) && !isSpaceChar(edgeChars(right).first);
+  /** The run with each word that does not read in this style given up a mark, or failing that all of them. */
+  const repaired = (style: InlineStyle): Piece[] => {
+    const out = [...pieces];
+    for (let start = 0, end = 1; start < pieces.length; start = end, end = start + 1) {
+      while (end < pieces.length && sameWord(pieces[end - 1], pieces[end])) end += 1;
+      const word = Array.from({ length: end - start }, (_, offset) => start + offset);
+      if (!word.some((index) => atRisk(pieces[index], index))) continue;
+      const from = Math.max(0, start - 1);
+      const beside = pieces.slice(from, end + 1);
+      if (readsIn(style, settled(beside))) continue;
+      const attempts = (['italic', 'bold'] as const).flatMap((mark) => word.filter((index) => marked(pieces[index], mark)).map((index) => ({ mark, index })));
+      const fix = attempts
+        .slice(0, MAX_MARK_ATTEMPTS)
+        .find(({ mark, index }) => readsIn(style, settled(beside.map((piece, offset) => (from + offset === index ? { ...piece, [mark]: false } : piece)))));
+      for (const index of word) {
+        if (!fix) out[index] = withoutMarks(pieces[index]);
+        else if (index === fix.index) out[index] = { ...pieces[index], [fix.mark]: false };
+      }
     }
-  }
-  const plain = joinPieces(pieces.map((piece) => (isFormatted(piece) ? { ...piece, bold: false, italic: false } : piece)));
+    return settled(out);
+  };
+  // A word that needs a mark off in one style may read whole in another, so the style that kept the most wins.
+  const kept = (candidate: readonly Piece[]): number =>
+    candidate.reduce((sum, piece) => sum + (isFormatted(piece) ? (Number(piece.bold) + Number(piece.italic)) * piece.text.length : 0), 0);
+  const candidates = STYLES.flatMap((style) => {
+    const candidate = repaired(style);
+    return readsIn(style, candidate) ? [candidate] : [];
+  });
+  if (candidates.length > 0) return candidates.reduce((best, candidate) => (kept(candidate) > kept(best) ? candidate : best));
+  const plain = joinPieces(pieces.map(withoutMarks));
   return reads(plain) ? plain : pieces;
 }
 

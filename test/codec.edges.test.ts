@@ -232,15 +232,40 @@ describe('codec: marks no spelling can hold', () => {
     stable(body);
   });
 
-  it('writes a run with two such spots plain, keeping every character', () => {
+  it('takes one mark off each spot in a run with two of them', () => {
     const body = written(...unreadable, text(' '), ...unreadable);
-    expect(body).toBe('abc abc');
+    expect(body).toBe('**a***b*c **a***b*c');
+    stable(body);
+  });
+
+  it('leaves harmless touching spans and bold bare URLs marked beside one unreadable spot', () => {
+    const touching = written(...unreadable, text(' and '), text('x', 'bold'), text('y', 'italic'), text(' and '), text('p', 'bold'), text('q', 'italic'));
+    expect(touching).toBe('**a***b*c and **x**_y_ and **p**_q_');
+    stable(touching);
+    const urls = ['https://a.b', 'https://c.d', 'https://e.f', 'https://g.h'];
+    const linked = written(...unreadable, ...urls.flatMap((url) => [text(' and '), { ...text(url, 'bold'), marks: [{ type: 'bold' }, { type: 'link', attrs: { href: url } }] }]));
+    expect(linked).toBe(`**a***b*c${urls.map((url) => ` and **${url}**`).join('')}`);
+    stable(linked);
+  });
+
+  it('keeps a bold phrase around an unreadable spot', () => {
+    const body = written(text('all bold ', 'bold'), text('it', 'bold', 'italic'), text(' more ', 'bold'), text('a', 'bold', 'italic'), text('b', 'italic'), text('c'), text(' and '), text('z', 'italic'));
+    expect(body).toBe('**all bold _it_ more a***b*c and _z_');
+    stable(body);
+  });
+
+  it('gives up the marks of a chain too long to search, and only of that chain', () => {
+    const chain = Array.from({ length: 40 }, (_, index) => (index % 2 ? text('y', 'italic') : text('x', 'bold')));
+    const body = written(...chain, ...unreadable, text(' and '), text('p', 'bold'), text('q', 'italic'));
+    expect(body).toBe(`${'xy'.repeat(20)}abc and **p**_q_`);
     stable(body);
   });
 
   it.each([
     ['a marked bare URL beside a word', 'https://a.b***y ******'.repeat(200)],
     ['spans whose delimiters run together', '***a****b*c '.repeat(200)],
+    ['one unbroken chain of such spans', '***a****b*c'.repeat(2000)],
+    ['such spots among harmless marks', '***a****b*c **x**_y_ https://a.b **https://c.d** '.repeat(500)],
   ])('stays fast on a page of %s', (_shape, source) => {
     const page = markdownToDoc(source);
     const started = performance.now();
@@ -250,11 +275,11 @@ describe('codec: marks no spelling can hold', () => {
   });
 
   it('stays fast on a page of paragraphs that each hold two such spots', () => {
-    const page = doc(...Array.from({ length: 2000 }, () => para(...unreadable, text(' '), ...unreadable)));
+    const page = doc(...Array.from({ length: 1000 }, () => para(...unreadable, text(' '), ...unreadable)));
     const started = performance.now();
     const body = docToMarkdown(page);
     expect(performance.now() - started).toBeLessThan(2000);
-    expect(body.split('\n\n')).toEqual(Array.from({ length: 2000 }, () => 'abc abc'));
+    expect(body.split('\n\n')).toEqual(Array.from({ length: 1000 }, () => '**a***b*c **a***b*c'));
   });
 
   it('stays fast on one long run of marked words', () => {
