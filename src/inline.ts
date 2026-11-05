@@ -27,6 +27,8 @@ export type Inline<X = never> =
 /** How a GFM table column is aligned, read from its delimiter cell (`:--`, `:--:`, `--:`, `--`). */
 export type TableAlign = 'left' | 'center' | 'right' | 'none';
 
+const AUTOLINK_SCHEME = 'https://';
+
 /**
  * The alternation the inline scanner walks, in precedence order: at each position, an earlier branch wins.
  *
@@ -35,7 +37,7 @@ export type TableAlign = 'left' | 'center' | 'right' | 'none';
  *  2. The plugins' tokens, in the order they were given.
  *  3. A `[[page]]` or `[[target|label]]` link, before the bracketed link that would otherwise read its `[`. Then a
  *     bracketed link, then a bare autolink, both https-only. A label may carry escaped punctuation (`\[`, `\]`), as
- *     GFM allows, and reads unescaped.
+ *     GFM allows, and reads unescaped. Only a bare link's scheme is matched here: `bareUrlEnd` walks the rest.
  *  4. A run of `*` or `_`, which may turn out to be emphasis or a literal character (see `parseInline`).
  *  5. A backslash escape (`\_`, `\*`, `\[`): the punctuation reads as itself. `\:` is in the set, as in CommonMark, so
  *     a writer can spell a literal `https:` or a line starting `:::`.
@@ -46,7 +48,7 @@ function inlineSource(options: GrammarOptions): string {
     ...(options.plugins ?? []).map((plugin, index) => `(?<atom${index}>${plugin.pattern})`),
     '\\[\\[(?<target>[^\\[\\]\\n|]+?)(?:\\|(?<label>[^\\[\\]\\n]+?))?\\]\\]',
     '\\[(?<linkText>(?:\\\\[\\\\`*_{}\\[\\]()<>#+\\-.!|~:]|[^\\]\\\\\\n])+)\\]\\((?<href>https:\\/\\/[^\\s)]+)\\)',
-    '(?<auto>https:\\/\\/[^\\s<>()\\[\\]\'"]*[^\\s<>()\\[\\].,;:!?\'"])',
+    '(?<auto>https:\\/\\/)',
     '(?<run>\\*+|_+)',
     '\\\\(?<escaped>[\\\\`*_{}\\[\\]()<>#+\\-.!|~:])',
   ].join('|');
@@ -110,11 +112,15 @@ interface MarkerRun {
   closes: EmphasisKind[];
 }
 
-/**
- * How many runs may wait to be closed at once. It bounds how deep emphasis can nest, so a pathological body cannot
- * overflow the stack of whatever walks the tree, and it keeps the pairing linear.
- */
+/** How many runs may wait to be closed at once, which keeps the pairing linear. */
 const MAX_OPEN_RUNS = 32;
+
+/**
+ * How deep emphasis nests, so a pathological body cannot overflow the stack of whatever walks the tree. One run can open
+ * a span per pair of its markers, so the runs waiting do not bound this: `buildTree` does, and the markers of a span past
+ * the cap read as the literal characters they are.
+ */
+const MAX_EMPHASIS_DEPTH = 32;
 
 /** CommonMark's rule of three: a run that can both open and close does not pair where the two sizes add to a multiple of 3. */
 function ruleOfThree(opener: MarkerRun, closer: MarkerRun): boolean {
@@ -152,6 +158,32 @@ function pairRun(run: MarkerRun, waiting: Record<string, MarkerRun[]>): void {
   if (run.canOpen && run.left > 0 && open < MAX_OPEN_RUNS) stack.push(run);
 }
 
+/** Whether a run has a waiting opener to pair with, which is what makes it a closing marker. */
+function closesAny(run: MarkerRun, waiting: Record<string, MarkerRun[]>): boolean {
+  return run.canClose && waiting[run.marker].some((opener) => !ruleOfThree(opener, run));
+}
+
+const URL_TRAILING_PUNCTUATION = '.,;:!?';
+
+/**
+ * Where the bare URL starting at `start` ends. A URL may hold `*` and `_`, but a run that would close a span waiting
+ * around the URL closes it (`**https://a.b**`), so the URL stops there, and a run that closes nothing stays in it. The
+ * walk goes no further than where it stops, so a line of such URLs stays linear. Trailing punctuation is the sentence's.
+ * The end is right after the scheme when no URL is left.
+ */
+function bareUrlEnd(text: string, start: number, closes: (run: string, at: number) => boolean): number {
+  const part = /\*+|_+|[^\s<>()[\]'"*_]+/y;
+  const scheme = start + AUTOLINK_SCHEME.length;
+  part.lastIndex = scheme;
+  let end = scheme;
+  for (let match = part.exec(text); match !== null; match = part.exec(text)) {
+    if ((match[0][0] === '*' || match[0][0] === '_') && closes(match[0], match.index)) break;
+    end = match.index + match[0].length;
+  }
+  while (end > scheme && URL_TRAILING_PUNCTUATION.includes(text[end - 1])) end -= 1;
+  return end;
+}
+
 /**
  * One inline run as a token tree. The scanner reads its tokens in one pass and pairs the `*` and `_` runs as it meets
  * them, the way CommonMark's delimiter stack does; a run that never pairs reads as the literal characters it is.
@@ -177,6 +209,21 @@ export function parseInline(text: string, options: GrammarOptions = {}): Inline[
   };
   const pushText = (value: string): void => {
     if (value !== '') pushItem({ kind: 'text', text: value }, value);
+  };
+  const markerRun = (run: string, at: number): MarkerRun => {
+    const before = charBefore(text, at);
+    const after = charAt(text, at + run.length);
+    return {
+      kind: 'run',
+      marker: run[0],
+      size: run.length,
+      left: run.length,
+      index: items.length,
+      canOpen: canOpenEmphasis(run[0], before, after),
+      canClose: canCloseEmphasis(run[0], before, after),
+      opens: [],
+      closes: [],
+    };
   };
 
   for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
@@ -207,22 +254,13 @@ export function parseInline(text: string, options: GrammarOptions = {}): Inline[
     } else if (groups.linkText !== undefined && groups.href !== undefined) {
       pushItem({ kind: 'link', href: groups.href, text: groups.linkText.replace(ESCAPED_PUNCTUATION, '$1') }, match[0]);
     } else if (groups.auto !== undefined) {
-      pushItem({ kind: 'link', href: groups.auto, text: groups.auto }, match[0]);
+      cursor = bareUrlEnd(text, match.index, (run, at) => closesAny(markerRun(run, at), waiting));
+      pattern.lastIndex = cursor;
+      const url = text.slice(match.index, cursor);
+      if (url === AUTOLINK_SCHEME) pushText(url);
+      else pushItem({ kind: 'link', href: url, text: url }, url);
     } else if (groups.run !== undefined) {
-      const marker = groups.run[0];
-      const before = charBefore(text, match.index);
-      const after = charAt(text, cursor);
-      const run: MarkerRun = {
-        kind: 'run',
-        marker,
-        size: groups.run.length,
-        left: groups.run.length,
-        index: items.length,
-        canOpen: canOpenEmphasis(marker, before, after),
-        canClose: canCloseEmphasis(marker, before, after),
-        opens: [],
-        closes: [],
-      };
+      const run = markerRun(groups.run, match.index);
       pairRun(run, waiting);
       items.push(run);
     } else if (groups.escaped !== undefined) {
@@ -234,9 +272,15 @@ export function parseInline(text: string, options: GrammarOptions = {}): Inline[
   return buildTree(items);
 }
 
-/** The scanned items as a tree: each run closes its spans, leaves what never paired as text, then opens its spans. */
+/**
+ * The scanned items as a tree: each run closes its spans, leaves what never paired as text, then opens its spans. A run
+ * opens its outermost span first, with the markers nearest its content paired first. A span past `MAX_EMPHASIS_DEPTH`
+ * is not one: its markers read as text, where they stand.
+ */
 function buildTree(items: ReadonlyArray<Inline | MarkerRun>): Inline[] {
   const frames: Inline[][] = [[]];
+  // One entry per span open at this point, innermost last: whether it holds a frame, or is past the cap and literal.
+  const open: boolean[] = [];
   const push = (node: Inline): void => {
     const top = frames[frames.length - 1];
     const last = top[top.length - 1];
@@ -250,12 +294,18 @@ function buildTree(items: ReadonlyArray<Inline | MarkerRun>): Inline[] {
       push(item);
       continue;
     }
+    const literal = (kind: EmphasisKind): void => push({ kind: 'text', text: item.marker.repeat(kind === 'strong' ? 2 : 1) });
     for (const kind of item.closes) {
-      const children = frames.pop() ?? [];
-      push({ kind, children });
+      if (open.pop()) push({ kind, children: frames.pop() ?? [] });
+      else literal(kind);
     }
     if (item.left > 0) push({ kind: 'text', text: item.marker.repeat(item.left) });
-    for (let count = item.opens.length; count > 0; count -= 1) frames.push([]);
+    for (const kind of [...item.opens].reverse()) {
+      const held = frames.length <= MAX_EMPHASIS_DEPTH;
+      open.push(held);
+      if (held) frames.push([]);
+      else literal(kind);
+    }
   }
   return frames[0];
 }

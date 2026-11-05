@@ -1,5 +1,5 @@
 import type { JSONContent } from '@tiptap/core';
-import { canCloseEmphasis, canOpenEmphasis, charAt, charBefore, isDelimiterRow, isSpaceChar, type TableAlign } from './inline.js';
+import { canCloseEmphasis, canOpenEmphasis, charAt, charBefore, isDelimiterRow, isPunctuationChar, isSpaceChar, type TableAlign } from './inline.js';
 import { FRONT_MATTER_KEY, FRONT_MATTER_LANG, parseDocBody, parseDocInline, type DocBlock, type DocCalloutKind, type DocInline, type DocListItem } from './parse.js';
 import { tokenMatcher, type GrammarOptions, type MarkdownPlugin } from './plugin.js';
 
@@ -474,6 +474,7 @@ interface InlineStyle {
 const STYLES: readonly InlineStyle[] = [
   { bareAutolinks: true, escape: 'light' },
   { bareAutolinks: false, escape: 'light' },
+  { bareAutolinks: true, escape: 'full' },
   { bareAutolinks: false, escape: 'full' },
 ];
 
@@ -627,8 +628,9 @@ function toPieces(nodes: readonly JSONContent[], options: InlineOptions): Piece[
 function readableMarks(pieces: Piece[], options: InlineOptions): Piece[] {
   const marked = (piece: Piece, mark: 'bold' | 'italic'): boolean => isFormatted(piece) && piece[mark];
   const anyMark = (piece: Piece): boolean => marked(piece, 'bold') || marked(piece, 'italic');
-  // Only spans of different marks can touch; everything else was fitted above. This is on the path of every run, so most stop here.
-  if (!pieces.some((piece, index) => index > 0 && anyMark(piece) && anyMark(pieces[index - 1]))) return pieces;
+  // Only spans of different marks can touch, and only a bare link can lean on being written bare; everything else was
+  // fitted above. This is on the path of every run, so most stop here.
+  if (!pieces.some((piece, index) => (index > 0 && anyMark(piece) && anyMark(pieces[index - 1])) || (piece.kind === 'link' && anyMark(piece) && writesBare(piece)))) return pieces;
   // Read as a run, so a table's pipe escapes (the row reads those, before the cell) stay out of it.
   const asRun = { ...options, table: false };
   const reads = (candidate: readonly Piece[]): boolean =>
@@ -707,7 +709,18 @@ function joinPieces(pieces: readonly Piece[]): Piece[] {
   return out;
 }
 
-/** What a piece writes first and last, as the flanking rules see it. A link counts as bracketed: a bare one may not survive. */
+/** A URL that reads back whole when written bare, whatever span is around it: `*` could close one, and the rest would end it. */
+const BARE_URL = /^https:\/\/[^\s<>()[\]'"*]*[^\s<>()[\].,;:!?'"*]$/;
+
+function writesBare(link: Extract<Piece, { kind: 'link' }>): boolean {
+  return link.text === link.href && BARE_URL.test(link.href);
+}
+
+/**
+ * What a piece writes first and last, as the flanking rules see it. A link counts as bracketed, as a bare one may not
+ * survive, unless it is marked and can be written bare: that is the one spelling that can mark it beside a word
+ * (`x*https://a.b*y`), and `readableMarks` checks that it reads.
+ */
 function edgeChars(piece: Piece): { first: string; last: string } {
   switch (piece.kind) {
     case 'text':
@@ -721,6 +734,8 @@ function edgeChars(piece: Piece): { first: string; last: string } {
       return { first: '[', last: ']' };
     case 'image':
       return { first: '!', last: ')' };
+    case 'link':
+      return (piece.bold || piece.italic) && writesBare(piece) ? { first: charAt(piece.href, 0), last: charBefore(piece.href, piece.href.length) } : { first: '[', last: ')' };
     default:
       return { first: '[', last: ')' };
   }
@@ -734,8 +749,8 @@ const TRAILING_PUNCTUATION = /\s*[\p{P}\p{S}]+$/u;
  * CommonMark cannot write every span: a marker between a word and punctuation is not a delimiter, so no spelling makes
  * `(b)` italic in `a(b)c`, or bold `Note:` directly before a word. Such a span gives up what it must for the text to stay
  * exactly as typed. Text at its edge gives up the punctuation (`a(_b_)c`), and a code span or link, which cannot be cut,
- * gives up the mark. Two marks starting or ending together beside a word (`x` then bold italic `y`) leave no spelling
- * either, because the inner delimiter is itself punctuation, so italic is given up first, as in `markableAs`.
+ * gives up the mark. Two marks starting or ending together are one run of `*` (`x***y***z`), so the character beside
+ * that run is what counts, and where it cannot work italic is given up first, as in `markableAs`.
  *
  * Checked with `*`, the more permissive marker: if it cannot work, `_` cannot.
  */
@@ -768,9 +783,9 @@ function fitMarksToFlanking(pieces: Piece[]): Piece[] {
     const opening = afterMarks.filter((mark) => !beforeMarks.includes(mark));
     const last = edgeChars(before).last;
     const first = edgeChars(after).first;
-    // A span's edge whitespace is written outside it, and whichever span ends or starts first puts its marker between.
-    const opens = opening.length === 0 || isSpaceChar(first) || canOpenEmphasis('*', closing.length > 0 ? '*' : last, opening.length === 2 ? '*' : first);
-    const closes = closing.length === 0 || isSpaceChar(last) || canCloseEmphasis('*', closing.length === 2 ? '*' : last, opening.length > 0 ? '*' : first);
+    // A span's edge whitespace is written outside it, and a span ending and another starting put a marker between them.
+    const opens = opening.length === 0 || isSpaceChar(first) || canOpenEmphasis('*', closing.length > 0 ? '*' : last, first);
+    const closes = closing.length === 0 || isSpaceChar(last) || canCloseEmphasis('*', last, opening.length > 0 ? '*' : first);
     if (opens && closes) {
       index += 1;
       continue;
@@ -878,8 +893,14 @@ interface SpanEdges {
 }
 
 const NO_EDGES: SpanEdges = { before: '', after: '' };
-/** Inside another span, its delimiter is what sits beside this one. */
-const INSIDE_SPAN: SpanEdges = { before: '*', after: '*' };
+/**
+ * What sits beside a span nested in another. That span's delimiter does, but beside a word only `*` can write the outer
+ * span, and only if the inner one touching that edge takes `*` too, as one run (`x***y***z`). So a word shows through.
+ */
+function insideSpan(edges: SpanEdges): SpanEdges {
+  const isWord = (char: string): boolean => !isSpaceChar(char) && !isPunctuationChar(char);
+  return { before: isWord(edges.before) ? edges.before : '*', after: isWord(edges.after) ? edges.after : '*' };
+}
 
 function renderSpans(pieces: readonly Piece[], style: InlineStyle, options: InlineOptions, mark: 'bold' | 'italic' | null, edges: SpanEdges = NO_EDGES): string {
   if (mark === null) return pieces.map((piece, index) => renderPiece(piece, style, options, pieces[index + 1])).join('');
@@ -914,18 +935,19 @@ function renderSpans(pieces: readonly Piece[], style: InlineStyle, options: Inli
  * piece. Adjacent spans read back as one run. Only content no span can hold is left unmarked.
  */
 function wrapRun(inner: readonly Formatted[], mark: 'bold' | 'italic', style: InlineStyle, options: InlineOptions, edges: SpanEdges): string {
-  const render = (part: readonly Formatted[]): string => renderSpans(part, style, options, mark === 'bold' ? 'italic' : null, INSIDE_SPAN);
-  const whole = render(inner);
+  const render = (part: readonly Formatted[], around: SpanEdges): string => renderSpans(part, style, options, mark === 'bold' ? 'italic' : null, insideSpan(around));
+  const whole = render(inner, edges);
   const wrapped = delimit(whole, mark, options.plugins ?? [], edges);
   if (wrapped !== whole || whole.trim() === '') return wrapped;
   const attempt = (parts: readonly Formatted[][]): string | null => {
     let out = '';
     for (const [index, part] of parts.entries()) {
-      const content = render(part);
-      const span = delimit(content, mark, options.plugins ?? [], {
+      const around: SpanEdges = {
         before: out === '' ? edges.before : charBefore(out, out.length),
         after: index === parts.length - 1 ? edges.after : '*',
-      });
+      };
+      const content = render(part, around);
+      const span = delimit(content, mark, options.plugins ?? [], around);
       if (span === content && content.trim() !== '') return null;
       out += span;
     }
@@ -986,13 +1008,27 @@ function delimit(content: string, mark: 'bold' | 'italic', plugins: readonly Mar
   const candidates = mark === 'bold' ? ['**', '__'] : ['_', '*'];
   const before = lead === '' ? edges.before : charBefore(lead, lead.length);
   const after = trail === '' ? edges.after : charAt(trail, 0);
+  const kind = mark === 'bold' ? 'strong' : 'emphasis';
   for (const delim of candidates) {
-    if (!canOpenEmphasis(delim[0], before, charAt(core, 0)) || !canCloseEmphasis(delim[0], charBefore(core, core.length), after)) continue;
+    // A nested span's delimiter joins this one's run when it is the same marker, so the characters past it are what flank.
+    const joined = delim[0] === '*' ? core.replace(/^\*+/, '') : core;
+    const first = charAt(joined, 0);
+    const last = delim[0] === '*' ? trimTrailingStars(core) : core;
+    if (!canOpenEmphasis(delim[0], before, first) || !canCloseEmphasis(delim[0], charBefore(last, last.length), after)) continue;
     const body = `${delim}${core}${delim}`;
     const [token, ...rest] = parseDocInline(body, { plugins });
-    if (rest.length === 0 && token?.kind === (mark === 'bold' ? 'strong' : 'emphasis')) return `${lead}${body}${trail}`;
+    if (rest.length !== 0 || token === undefined) continue;
+    // `***a***` reads as a span in a span, with either on the outside.
+    const onlyChild = (token.kind === 'strong' || token.kind === 'emphasis') && token.children.length === 1 ? token.children[0] : undefined;
+    if (token.kind === kind || onlyChild?.kind === kind) return `${lead}${body}${trail}`;
   }
   return content;
+}
+
+function trimTrailingStars(text: string): string {
+  let end = text.length;
+  while (end > 0 && text[end - 1] === '*') end -= 1;
+  return text.slice(0, end);
 }
 
 /** Characters that can open markup somewhere in the inline grammar; escaped when a run is written defensively. */

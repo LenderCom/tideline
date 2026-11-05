@@ -298,13 +298,88 @@ describe('parseDocInline: which markers are emphasis', () => {
     expect(parseDocInline('𝒜*a*𝒜')).toEqual([...plain('𝒜'), em('a'), ...plain('𝒜')]);
   });
 
+  const depth = (run: readonly DocInline[]): number =>
+    Math.max(0, ...run.map((node) => (node.kind === 'strong' || node.kind === 'emphasis' ? 1 + depth(node.children) : 0)));
+  const flat = (run: readonly DocInline[]): string =>
+    run.map((node) => (node.kind === 'strong' || node.kind === 'emphasis' ? flat(node.children) : node.kind === 'text' ? node.text : '')).join('');
+
+  it('caps how deep one long run of markers nests, and keeps the markers past the cap as text', () => {
+    // Each side of `a`: how many markers a run of this size leaves literal. An odd run's outermost span takes one marker.
+    const cases: Array<[size: number, depth: number, literal: number]> = [
+      [32, 16, 0],
+      [64, 32, 0],
+      [65, 32, 2],
+      [66, 32, 2],
+      [100, 32, 36],
+      [101, 32, 38],
+      [20_000, 32, 19_936],
+    ];
+    for (const marker of ['*', '_']) {
+      for (const [size, deep, literal] of cases) {
+        const run = parseDocInline(`${marker.repeat(size)}a${marker.repeat(size)}`);
+        expect(depth(run)).toBe(deep);
+        expect(flat(run)).toBe(`${marker.repeat(literal)}a${marker.repeat(literal)}`);
+      }
+    }
+    // Depth is what is capped, not how many: spans side by side all stay spans.
+    expect(parseDocInline('**a** '.repeat(100)).filter((node) => node.kind === 'strong')).toHaveLength(100);
+  });
+
+  it('caps depth when spans of one run nest around others', () => {
+    const body = `${'**'.repeat(40)}a${'**'.repeat(40)} ${'*a '.repeat(40)}b${' c*'.repeat(40)}`;
+    const run = parseDocInline(body);
+    expect(depth(run)).toBeLessThanOrEqual(32);
+    expect(run.some((node) => node.kind === 'text' && node.text.includes('c'))).toBe(true);
+  });
+
   it('caps how deep emphasis nests, and stays fast on a line of unpaired markers', () => {
-    const depth = (run: readonly DocInline[]): number =>
-      Math.max(0, ...run.map((node) => (node.kind === 'strong' || node.kind === 'emphasis' ? 1 + depth(node.children) : 0)));
     const nested = parseDocInline(`${'*a '.repeat(5000)}b${' c*'.repeat(5000)}`);
     expect(depth(nested)).toBeLessThanOrEqual(32);
     const started = performance.now();
     parseDocInline('*a _b '.repeat(50_000));
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe('parseDocInline: a bare URL in emphasis', () => {
+  const link = (href: string) => ({ kind: 'link', href, text: href });
+  const strong = (...children: unknown[]) => ({ kind: 'strong', children });
+  const em = (...children: unknown[]) => ({ kind: 'emphasis', children });
+
+  it('leaves the closing marker to close', () => {
+    expect(parseDocInline('**https://example.com**')).toEqual([strong(link('https://example.com'))]);
+    expect(parseDocInline('__https://example.com__')).toEqual([strong(link('https://example.com'))]);
+    expect(parseDocInline('*https://example.com/a*')).toEqual([em(link('https://example.com/a'))]);
+    expect(parseDocInline('_https://example.com/a_')).toEqual([em(link('https://example.com/a'))]);
+    expect(parseDocInline('***https://example.com***')).toEqual([em(strong(link('https://example.com')))]);
+    expect(parseDocInline('**https://a.b**, then **https://c.d**.')).toEqual([strong(link('https://a.b')), { kind: 'text', text: ', then ' }, strong(link('https://c.d')), { kind: 'text', text: '.' }]);
+    expect(parseDocInline('**see https://a.b**x')).toEqual([strong({ kind: 'text', text: 'see ' }, link('https://a.b')), { kind: 'text', text: 'x' }]);
+    expect(parseDocInline('**https://a.b/.**')).toEqual([strong(link('https://a.b/'), { kind: 'text', text: '.' })]);
+    expect(parseDocInline('*https://*')).toEqual([em({ kind: 'text', text: 'https://' })]);
+  });
+
+  it('keeps a marker in the URL when it closes nothing', () => {
+    expect(parseDocInline('https://a.b/x_y_z')).toEqual([link('https://a.b/x_y_z')]);
+    expect(parseDocInline('https://a.b/x*')).toEqual([link('https://a.b/x*')]);
+    expect(parseDocInline('https://a.b/x_')).toEqual([link('https://a.b/x_')]);
+    expect(parseDocInline('https://a.b**')).toEqual([link('https://a.b**')]);
+    expect(parseDocInline('_https://a.b/x_y_')).toEqual([em(link('https://a.b/x_y'))]);
+    expect(parseDocInline('**https://a.b/x*y**')).toEqual([strong(link('https://a.b/x*y'))]);
+    expect(parseDocInline('*https://a.b/*x*')).toEqual([em(link('https://a.b/*x'))]);
+    expect(parseDocInline('*a* https://a.b/x*')).toEqual([em({ kind: 'text', text: 'a' }), { kind: 'text', text: ' ' }, link('https://a.b/x*')]);
+  });
+
+  it('still leaves the same punctuation and non-URLs out of a bare link', () => {
+    expect(parseDocInline('https://a.b.')).toEqual([link('https://a.b'), { kind: 'text', text: '.' }]);
+    expect(parseDocInline('(https://a.b/c).')).toEqual([{ kind: 'text', text: '(' }, link('https://a.b/c'), { kind: 'text', text: ').' }]);
+    expect(parseDocInline('https://')).toEqual([{ kind: 'text', text: 'https://' }]);
+    expect(parseDocInline('https://.')).toEqual([{ kind: 'text', text: 'https://.' }]);
+    expect(parseDocInline('http://a.b')).toEqual([{ kind: 'text', text: 'http://a.b' }]);
+  });
+
+  it('stays linear on a line of URLs that each close a span', () => {
+    const started = performance.now();
+    parseDocInline('**https://a'.repeat(100_000));
     expect(performance.now() - started).toBeLessThan(2000);
   });
 });

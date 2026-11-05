@@ -20,7 +20,7 @@ It's an ES module, headless, and runs anywhere Node 20 or later does: in a brows
 ## Install
 
 ```sh
-npm install @bydawn/tideline@0.1.0 \
+npm install @bydawn/tideline@0.1.1 \
   @tiptap/core@3.31.4 @tiptap/extension-code@3.31.4 @tiptap/extension-code-block@3.31.4 @tiptap/extension-image@3.31.4 @tiptap/extension-list@3.31.4 @tiptap/extension-table@3.31.4 @tiptap/pm@3.31.4 @tiptap/starter-kit@3.31.4
 ```
 
@@ -59,7 +59,7 @@ tideline reads and writes one markdown dialect, and it comes with an editor sche
 | Construct | Canonical form |
 |---|---|
 | Paragraphs and hard breaks | Lines of text; one newline is a hard break |
-| Bold, italic, both | `**bold**`, `_italic_`, `**_both_**`, and `un*believ*able` where `_` can't work |
+| Bold, italic, both | `**bold**`, `_italic_`, `**_both_**`, and `un*believ*able` or `x***both***y` where `_` can't work |
 | Code | `` `code` ``, ``` ``a ` tick`` ```, and a span that runs across a line |
 | Links | `[text](https://…)`, a bare `https://…`, `[text](#anchor)`, `[file](attachment:id)` |
 | Page links | `[[target]]`, `[[target\|label]]`. Your application resolves the target |
@@ -86,6 +86,7 @@ tideline reads and writes one markdown dialect, and it comes with an editor sche
 | `## Title ##` | `## Title` | The closing hashes are decoration |
 | An unterminated code fence | A closed one | It runs to the end of the page |
 | An indented code block | A fence | One code spelling |
+| Emphasis nested more than 32 deep | The markers past that depth, as literal characters | Whatever walks the tree stays within its stack |
 | Two adjacent lists of one kind | One list | Markdown cannot write them apart |
 | An escape nothing needs, such as `C:\\Users` or a lone `\*` | `C:\Users`, `*` | The writer escapes only what would read as markup |
 
@@ -97,7 +98,7 @@ The schema doesn't offer these, but pasted JSON can carry them. The writer never
 - A hard break at the end of a paragraph, and empty paragraphs, are dropped.
 - A second paragraph in a table cell joins the first with a space. Merged cells and block content in cells aren't written.
 - A callout nested inside a callout, with more after it, is written as its content.
-- Bold or italic that no delimiter can write where it sits gives up as little as it can. A word then `(b)` in italic then a word comes out as `a(_b_)c`, and bold `Note:` directly before a word as `**Note**:text`. A code span or link there loses the mark.
+- Bold or italic that no delimiter can write where it sits gives up as little as it can. A word then `(b)` in italic then a word comes out as `a(_b_)c`, and bold `Note:` directly before a word as `**Note**:text`. A code span or bracketed link there loses the mark.
 - Bold or italic on an inline atom isn't kept: Yjs keeps marks on text only, so co-editing would lose it anyway.
 - A code-block line that would close its fence gets a zero-width space in front of it.
 

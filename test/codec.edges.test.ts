@@ -133,8 +133,21 @@ describe('codec: marks and the flanking rules', () => {
     expect(written(text('Note:', 'bold'), text('text'))).toBe('**Note**:text');
     expect(written(text('a'), text('(', 'bold'), text('b'))).toBe('a(b');
     expect(written(text('x'), text('code', 'italic', 'code'), text('y'))).toBe('x`code`y');
-    expect(written(text('x'), text('q', 'bold', 'italic'), text('y'))).toBe('x**q**y');
-    expect(written(text('q', 'bold', 'italic'), text('y'))).toBe('**q**y');
+  });
+
+  it('writes bold italic beside a word as one run of `*`, so it keeps both marks', () => {
+    expect(written(text('x'), text('q', 'bold', 'italic'), text('y'))).toBe('x***q***y');
+    expect(written(text('q', 'bold', 'italic'), text('y'))).toBe('***q***y');
+    expect(written(text('x'), text('q', 'bold', 'italic'))).toBe('x***q***');
+    expect(written(text('x '), text('q', 'bold', 'italic'), text(' y'))).toBe('x **_q_** y');
+    for (const body of ['x***q***y', '***q***y', 'x***q***']) stable(body);
+    const read = paragraphInline('x***q***y');
+    expect(leaves(read).find((leaf) => leaf.text === 'q')?.marks).toBe(leaves(paragraphInline('***q***'))[0].marks);
+    // One mark running on past the other, and punctuation at the edge, which gives up only what it must.
+    expect(written(text('x'), text('q', 'bold', 'italic'), text('r', 'bold'), text('y'))).toBe('x***q*r**y');
+    expect(written(text('x'), text('r', 'bold'), text('q', 'bold', 'italic'), text('y'))).toBe('x**r*q***y');
+    expect(written(text('x'), text('(q)', 'bold', 'italic'), text('y'))).toBe('x(**_q_**)y');
+    expect(written(text('x'), text('q.', 'bold', 'italic'), text('y'))).toBe('x***q***.y');
   });
 
   it('gives up a mark rather than let delimiters that run together read as literal characters', () => {
@@ -156,6 +169,63 @@ describe('codec: marks and the flanking rules', () => {
     expect(written(text('a * b'))).toBe('a * b');
     expect(written(text('snake_case'))).toBe('snake_case');
     expect(written(text('_a_'))).toBe('\\_a\\_');
+  });
+});
+
+describe('codec: a bare URL in emphasis', () => {
+  it.each([
+    '**https://example.com**',
+    '_https://example.com/a_',
+    '**https://example.com/a_b** and _https://example.com/c_d_',
+  ])('keeps %s as it stands', (body) => {
+    stable(body);
+  });
+
+  it('keeps a mark on one beside a word, where only the bare spelling can hold it', () => {
+    const url = 'https://example.com';
+    const link = (label: string, ...marks: string[]): JSONContent => ({ type: 'text', text: label, marks: [{ type: 'link', attrs: { href: url } }, ...marks.map((type) => ({ type }))] });
+    const body = (...content: JSONContent[]): string => {
+      const written = docToMarkdown(doc(para(...content)));
+      stable(written);
+      return written;
+    };
+    expect(body(link(url, 'bold'), text('y'))).toBe(`**${url}**y`);
+    expect(body(text('x'), link(url, 'italic'), text('y'))).toBe(`x*${url}*y`);
+    expect(body(text('x'), link(url, 'bold', 'italic'), text('y'))).toBe(`x***${url}***y`);
+    for (const old of [`**${url}**y`, `*${url}*y`, `x*${url}*y`, `**${url}**-y`]) stable(old);
+    // Bracketed, the closing marker follows `)` and cannot close, so the mark goes.
+    expect(body(link('label', 'bold'), text('y'))).toBe(`[label](${url})y`);
+    // A URL with a `*` in it could close the span early, so it counts as bracketed too.
+    const star = 'https://example.com/a*b';
+    const marked: JSONContent = { type: 'text', text: star, marks: [{ type: 'link', attrs: { href: star } }, { type: 'bold' }] };
+    expect(leaves(paragraphInline(body(marked, text('y')))).map((leaf) => leaf.text).join('')).toBe(`${star}y`);
+    // Text beside it that needs escaping does not cost the link its bare spelling, or the mark.
+    expect(body(text('*a* '), link(url, 'bold'), text('y'))).toBe(`\\*a\\* **${url}**y`);
+  });
+
+  it('writes one under `*`, and normalises the old `*` spelling once', () => {
+    expect(docToMarkdown(markdownToDoc('*https://example.com/a*'))).toBe('_https://example.com/a_');
+    const link = { type: 'text', text: 'https://example.com', marks: [{ type: 'link', attrs: { href: 'https://example.com' } }, { type: 'bold' }] };
+    expect(docToMarkdown(doc(para(link)))).toBe('**https://example.com**');
+  });
+
+  it('keeps a URL that ends in the marker around it, under the other marker or in brackets', () => {
+    const marked = (url: string, ...marks: string[]): JSONContent => ({ type: 'text', text: url, marks: [{ type: 'link', attrs: { href: url } }, ...marks.map((type) => ({ type }))] });
+    const star = 'https://example.com/a*';
+    expect(docToMarkdown(doc(para(marked(star, 'bold'))))).toBe(`__${star}__`);
+    stable(`__${star}__`);
+    const both = 'https://example.com/a*_';
+    const body = docToMarkdown(doc(para(marked(both, 'bold'))));
+    expect(leaves(paragraphInline(body))).toEqual(leaves(paragraphInline(`**[${both}](${both})**`)));
+    stable(body);
+  });
+});
+
+describe('codec: emphasis past the depth cap', () => {
+  it('reads a long run of markers without throwing, and is stable after one pass', () => {
+    const body = docToMarkdown(markdownToDoc(`${'*'.repeat(20_000)}a${'*'.repeat(20_000)}`));
+    stable(body);
+    expect(leaves(paragraphInline(body)).map((leaf) => leaf.text).join('').replace(/\*/g, '')).toBe('a');
   });
 });
 

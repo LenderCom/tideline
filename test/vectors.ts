@@ -31,6 +31,8 @@ export const CANONICAL: Record<string, string> = {
   'stray markers': 'snake_case_name, a * b * c, 2 * 3 and 4 ** 5, glob *.ts and *.md',
   'marker beside punctuation': 'f(*args, **kwargs)\n\n2*(3+4)*5',
   'word-inner emphasis': 'un*believ*able and a*b*c',
+  'bold italic beside a word': 'x***q***y and ***q***y',
+  'bare link in emphasis': '**https://example.com** and _https://example.com/a_',
   'backslash and link text': 'C:\\Users\\ and https\\://not.a.link',
   'front matter': '---\ntitle: A page\ntags: [a, b]\n\nnested:\n  key: value\n---\n\n# Title\n\nBody.',
 };
