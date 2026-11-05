@@ -59,7 +59,7 @@ tideline reads and writes one markdown dialect, and it comes with an editor sche
 | Construct | Canonical form |
 |---|---|
 | Paragraphs and hard breaks | Lines of text; one newline is a hard break |
-| Bold, italic, both | `**bold**`, `_italic_`, `**_both_**` |
+| Bold, italic, both | `**bold**`, `_italic_`, `**_both_**`, and `un*believ*able` where `_` can't work |
 | Code | `` `code` ``, ``` ``a ` tick`` ```, and a span that runs across a line |
 | Links | `[text](https://…)`, a bare `https://…`, `[text](#anchor)`, `[file](attachment:id)` |
 | Page links | `[[target]]`, `[[target\|label]]`. Your application resolves the target |
@@ -71,7 +71,9 @@ tideline reads and writes one markdown dialect, and it comes with an editor sche
 | Code blocks | ` ```lang ` fences. A `mermaid` fence opens as its own node |
 | Tables | GFM pipes, with `:---`, `---:` and `:---:` alignment |
 | Divider | `---` |
-| Escapes, where text would otherwise read as markup | `a \* b \* c`, `snake\_case\_name`, `https\://not.a.link` |
+| Front matter | `---` lines around a block at the very start of a body, whose first line is `key:`. It opens as a code block with the language `front-matter`, verbatim |
+| Literal markers, which CommonMark's flanking rules read as text | `a * b * c`, `*.ts and *.md`, `snake_case_name`, `2*(3+4)*5` |
+| Escapes, where text would otherwise read as markup | `\*not emphasis\*`, `https\://not.a.link` |
 
 ### What is normalised
 
@@ -83,8 +85,9 @@ tideline reads and writes one markdown dialect, and it comes with an editor sche
 | `:::info`, `:::success`, `:::caution`, `:::error` | `:::note`, `:::tip`, `:::warning`, `:::danger` | Aliases of the four kinds |
 | `## Title ##` | `## Title` | The closing hashes are decoration |
 | An unterminated code fence | A closed one | It runs to the end of the page |
+| An indented code block | A fence | One code spelling |
 | Two adjacent lists of one kind | One list | Markdown cannot write them apart |
-| An escape nothing needs, such as `C:\\Users` | `C:\Users` | The writer escapes only what would read as markup |
+| An escape nothing needs, such as `C:\\Users` or a lone `\*` | `C:\Users`, `*` | The writer escapes only what would read as markup |
 
 ### What an editor can hold that the format can't
 
@@ -94,6 +97,7 @@ The schema doesn't offer these, but pasted JSON can carry them. The writer never
 - A hard break at the end of a paragraph, and empty paragraphs, are dropped.
 - A second paragraph in a table cell joins the first with a space. Merged cells and block content in cells aren't written.
 - A callout nested inside a callout, with more after it, is written as its content.
+- Bold or italic that no delimiter can write where it sits gives up as little as it can. A word then `(b)` in italic then a word comes out as `a(_b_)c`, and bold `Note:` directly before a word as `**Note**:text`. A code span or link there loses the mark.
 - Bold or italic on an inline atom isn't kept: Yjs keeps marks on text only, so co-editing would lose it anyway.
 - A code-block line that would close its fence gets a zero-width space in front of it.
 

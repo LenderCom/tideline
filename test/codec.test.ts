@@ -135,6 +135,12 @@ describe('codec: documented normalisations', () => {
       ['**see [the zip](attachment:k2)**', '**see [the zip](attachment:k2)**'],
       ['__strong__ *em*', '**strong** _em_'],
       ['```\nunterminated', '```\nunterminated\n```'],
+      // A redundant escape goes; one that keeps a marker literal stays (see the `escapes` vector).
+      ['literal \\* star', 'literal * star'],
+      ['a \\_ b', 'a _ b'],
+      ['para\n\n    indented\n\n      code\n\nafter', 'para\n\n```\nindented\n\n  code\n```\n\nafter'],
+      ['- item\n\n      code', '- item\n  ```\n  code\n  ```'],
+      ['```front-matter\ntitle: x\n```', '---\ntitle: x\n---'],
     ];
     for (const [input, output] of cases) {
       expect(roundTrip(input)).toBe(output);
@@ -213,9 +219,9 @@ describe('codec: documented normalisations', () => {
     expect(docToMarkdown(doc)).toBe('a\n\ninsecure');
   });
 
-  it('cannot italicise a code span holding both delimiters, so it writes it plain', () => {
+  it('italicises a code span holding both delimiters: a marker inside code is not a marker', () => {
     const doc: JSONContent = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'a*b_c', marks: [{ type: 'italic' }, { type: 'code' }] }] }] };
-    expect(docToMarkdown(doc)).toBe('`a*b_c`');
+    expect(docToMarkdown(doc)).toBe('_`a*b_c`_');
     const italic: JSONContent = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'a*b', marks: [{ type: 'italic' }, { type: 'code' }] }] }] };
     expect(docToMarkdown(italic)).toBe('_`a*b`_');
   });

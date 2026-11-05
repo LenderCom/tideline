@@ -42,13 +42,17 @@ const line = fc.oneof(
   { weight: 1, arbitrary: fc.tuple(fc.constantFrom(':::note', ':::tip', ':::warning', ':::danger', ':::info', ':::bogus', '::: note'), fc.constantFrom('', ' Title', ' **T**')).map(([a, b]) => `${a}${b}`) },
   { weight: 1, arbitrary: fc.constantFrom(':::', ' :::', ':::  ') },
   { weight: 1, arbitrary: fc.constantFrom('---', '***', '___', '- - -', '----') },
+  { weight: 1, arbitrary: fc.tuple(fc.constantFrom('    ', '\t', '      '), inlineText).map(([i, t]) => `${i}${t}`) },
+  { weight: 1, arbitrary: fc.constantFrom('title: x', 'key:', 'a_b: *c*') },
   { weight: 2, arbitrary: fc.array(inlineText, { minLength: 1, maxLength: 3 }).map((cells) => `| ${cells.join(' | ')} |`) },
   { weight: 1, arbitrary: fc.constantFrom('| --- | --- |', '| :--- | ---: |', '|---|', '| :-: |', '--- | ---') },
   { weight: 2, arbitrary: fc.constant('') },
 );
+const lines = fc.array(line, { minLength: 1, maxLength: 14 }).map((list) => list.join('\n'));
 export const page = fc
-  .array(line, { minLength: 1, maxLength: 14 })
-  .map((lines) => lines.join('\n'))
+  // Front matter goes first or not at all, so a page is sometimes drawn with it on top.
+  .tuple(fc.constantFrom('', '', '', '---\ntitle: x\n\nkey: *y*\n---\n'), lines)
+  .map(([top, body]) => `${top}${body}`)
   // A code span running across lines that holds a backtick is beyond the format when one of its lines would read as a block
   // on its own (see the codec): pages with one are left out.
   .filter((body) => !inlineCodeOf(parseDocBody(body)).some((code) => code.includes('\n') && code.includes('`')));
@@ -81,7 +85,7 @@ const typed = fc
   .array(
     fc.oneof(
       { weight: 4, arbitrary: word },
-      { weight: 3, arbitrary: fc.constantFrom('*', '_', '`', '\\', '[', ']', '(', ')', '<', '<@u1>', '{#x}', '#', '|', ':', '!', '-', '+', '.', 'https://a.b', '[[p]]', '![a](attachment:k)', '[t](#a)', ':::', '```', '> ', '- ', '1. ') },
+      { weight: 3, arbitrary: fc.constantFrom('*', '**', '_', '__', '`', '\\', '[', ']', '(', ')', '<', '<@u1>', '{#x}', '#', '|', ':', '!', '-', '+', '.', 'https://a.b', '[[p]]', '![a](attachment:k)', '[t](#a)', ':::', '```', '> ', '- ', '1. ') },
       { weight: 2, arbitrary: fc.constant(' ') },
     ),
     { minLength: 1, maxLength: 6 },
@@ -188,7 +192,7 @@ const headingNode = fc
   .filter(([, , content]) => content.length > 0)
   .map(([level, anchor, content]): JSONContent => ({ type: 'heading', attrs: { level, anchor }, content }));
 const codeText = fc.array(fc.constantFrom('const a = 1;', '  indented', '', '\ttab', '<b>html</b>', '# not a heading', '- not a list', ':::', '> q', '|a|'), { minLength: 1, maxLength: 4 }).map((lines) => lines.join('\n'));
-const codeNode = fc.tuple(fc.constantFrom(null, 'ts', 'python', 'sh'), codeText).map(([language, text]): JSONContent => ({ type: 'codeBlock', attrs: { language }, content: text ? [{ type: 'text', text }] : undefined }));
+const codeNode = fc.tuple(fc.constantFrom(null, 'ts', 'python', 'sh', 'front-matter'), codeText).map(([language, text]): JSONContent => ({ type: 'codeBlock', attrs: { language }, content: text ? [{ type: 'text', text }] : undefined }));
 const mermaidNode = fc.constantFrom('graph TD\n  A-->B', 'sequenceDiagram\n  A->>B: hi').map((text): JSONContent => ({ type: 'mermaid', content: [{ type: 'text', text }] }));
 const ruleNode = fc.constant<JSONContent>({ type: 'horizontalRule' });
 const tableNode = fc

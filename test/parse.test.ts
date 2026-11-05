@@ -231,3 +231,134 @@ describe('the page parser', () => {
     ]);
   });
 });
+
+describe('parseDocInline: which markers are emphasis', () => {
+  const plain = (text: string) => [{ kind: 'text', text }];
+  const em = (text: string) => ({ kind: 'emphasis', children: [{ kind: 'text', text }] });
+  const strong = (text: string) => ({ kind: 'strong', children: [{ kind: 'text', text }] });
+
+  it.each([
+    'glob *.ts and *.md files',
+    'a * b * c',
+    '2 * 3 and 4 * 5 here',
+    'a ** b ** c',
+    'a _ b _ c',
+    'a __ b __ c',
+    '*a *',
+    '_a _',
+    '**a **',
+    'snake_case_name',
+    '__dunder__method',
+    '2*(3+4)*5',
+    'f(*args, **kwargs)',
+    'int *p = *q;',
+    '**Note:**text',
+    '*',
+    '_',
+    '***',
+  ])('reads %s as literal text', (text) => {
+    expect(parseDocInline(text)).toEqual(plain(text));
+  });
+
+  it('pairs what CommonMark pairs', () => {
+    expect(parseDocInline('*a*')).toEqual([em('a')]);
+    expect(parseDocInline('_a_')).toEqual([em('a')]);
+    expect(parseDocInline('**a**')).toEqual([strong('a')]);
+    expect(parseDocInline('__a__')).toEqual([strong('a')]);
+    expect(parseDocInline('2*3*4')).toEqual([...plain('2'), em('3'), ...plain('4')]);
+    expect(parseDocInline('_(a)_ x')).toEqual([em('(a)'), ...plain(' x')]);
+    expect(parseDocInline('**a*')).toEqual([...plain('*'), em('a')]);
+    expect(parseDocInline('*a**')).toEqual([em('a'), ...plain('*')]);
+    expect(parseDocInline('_a_b_')).toEqual([em('a_b')]);
+    expect(parseDocInline('*a *b*')).toEqual([...plain('*a '), em('b')]);
+    expect(parseDocInline('***a***')).toEqual([{ kind: 'emphasis', children: [strong('a')] }]);
+    expect(parseDocInline('*foo**bar*')).toEqual([em('foo**bar')]);
+    expect(parseDocInline('*a **b** c*')).toEqual([{ kind: 'emphasis', children: [{ kind: 'text', text: 'a ' }, strong('b'), { kind: 'text', text: ' c' }] }]);
+  });
+
+  it('does not close on a marker inside a code span, a link or an escape', () => {
+    expect(parseDocInline('*a `*` b*')).toEqual([{ kind: 'emphasis', children: [{ kind: 'text', text: 'a ' }, { kind: 'code', text: '*' }, { kind: 'text', text: ' b' }] }]);
+    expect(parseDocInline('*a [b*](https://c.d) e*')).toEqual([
+      { kind: 'emphasis', children: [{ kind: 'text', text: 'a ' }, { kind: 'link', href: 'https://c.d', text: 'b*' }, { kind: 'text', text: ' e' }] },
+    ]);
+    expect(parseDocInline('*a\\*b*')).toEqual([em('a*b')]);
+  });
+
+  it('leaves the inner marker literal when two spans cross', () => {
+    expect(parseDocInline('*a _b* c_')).toEqual([em('a _b'), ...plain(' c_')]);
+  });
+
+  it('keeps emphasis to one line, whatever flanks it', () => {
+    expect(parseDocInline('*a\nb*')).toEqual(plain('*a\nb*'));
+    expect(parseDocInline('*a `x\ny` b*')).toEqual([{ kind: 'text', text: '*a ' }, { kind: 'code', text: 'x\ny' }, { kind: 'text', text: ' b*' }]);
+  });
+
+  it('treats a surrogate pair next to a marker as one character', () => {
+    expect(parseDocInline('😀*a*😀')).toEqual([...plain('😀'), em('a'), ...plain('😀')]);
+    expect(parseDocInline('𝒜*a*𝒜')).toEqual([...plain('𝒜'), em('a'), ...plain('𝒜')]);
+  });
+
+  it('caps how deep emphasis nests, and stays fast on a line of unpaired markers', () => {
+    const depth = (run: readonly DocInline[]): number =>
+      Math.max(0, ...run.map((node) => (node.kind === 'strong' || node.kind === 'emphasis' ? 1 + depth(node.children) : 0)));
+    const nested = parseDocInline(`${'*a '.repeat(5000)}b${' c*'.repeat(5000)}`);
+    expect(depth(nested)).toBeLessThanOrEqual(32);
+    const started = performance.now();
+    parseDocInline('*a _b '.repeat(50_000));
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe('parseDocBody: indented code', () => {
+  it('reads an indented block as code, keeping its blank lines and inner indent', () => {
+    expect(parseDocBody('para\n\n    a\n\n      b\n\n\nafter')).toEqual([
+      { kind: 'paragraph', inline: [{ kind: 'text', text: 'para' }], source: 'para' },
+      { kind: 'code', text: 'a\n\n  b' },
+      { kind: 'paragraph', inline: [{ kind: 'text', text: 'after' }], source: 'after' },
+    ]);
+    expect(parseDocBody('\tcode')).toEqual([{ kind: 'code', text: 'code' }]);
+    expect(parseDocBody('    - not a list\n    # not a heading')).toEqual([{ kind: 'code', text: '- not a list\n# not a heading' }]);
+  });
+
+  it('keeps an indented line that carries on a paragraph as that paragraph', () => {
+    expect(parseDocBody('para\n    more')[0].kind).toBe('paragraph');
+    expect(parseDocBody('para\n    more')).toHaveLength(1);
+  });
+
+  it('reads code under a list item only after a blank line, and leaves over-indented sub-lists alone', () => {
+    const [first] = parseDocBody('- a\n      carried on');
+    expect(first.kind === 'list' && first.items[0].children[0].kind).toBe('paragraph');
+    const [second] = parseDocBody('- a\n\n      code');
+    expect(second.kind === 'list' && second.items[0].children[0]).toEqual({ kind: 'code', text: 'code' });
+    const [third] = parseDocBody('- a\n      - b');
+    expect(third.kind === 'list' && third.items[0].children[0].kind).toBe('list');
+  });
+
+  it('stops at the first line that is not indented, even with no blank line', () => {
+    expect(parseDocBody('    code\nafter').map((block) => block.kind)).toEqual(['code', 'paragraph']);
+  });
+});
+
+describe('parseDocBody: front matter', () => {
+  it('holds a leading block verbatim, and carries on with the page after it', () => {
+    expect(parseDocBody('---\ntitle: *x*\n\nkey:\n  - a\n---\n\n# H')).toEqual([
+      { kind: 'code', lang: 'front-matter', text: 'title: *x*\n\nkey:\n  - a' },
+      { kind: 'heading', level: 1, id: 'h', inline: [{ kind: 'text', text: 'H' }] },
+    ]);
+  });
+
+  it.each([
+    ['a divider then prose', '---\n\ntitle: x\n\n---'],
+    ['no key on its first line', '---\nJust a note\n---'],
+    ['no closing line', '---\ntitle: x'],
+    ['not at the very start', '\n---\ntitle: x\n---'],
+    ['an indented opener', ' ---\ntitle: x\n---'],
+  ])('does not read %s as front matter', (_, body) => {
+    expect(parseDocBody(body).some((block) => block.kind === 'code')).toBe(false);
+  });
+
+  it('is only a page\'s own: not inside a quote or a callout', () => {
+    expect(parseDocBody('> ---\n> title: x\n> ---')[0]).toMatchObject({ kind: 'quote' });
+    expect(JSON.stringify(parseDocBody(':::note\n---\ntitle: x\n---\n:::'))).not.toContain('front-matter');
+  });
+});

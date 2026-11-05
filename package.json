@@ -1,6 +1,6 @@
 {
   "name": "@bydawn/tideline",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Lossless Markdown ⇄ Tiptap 3, with a 3-way merge.",
   "license": "Apache-2.0",
   "author": "Lender Software Solutions LLC",

@@ -115,6 +115,72 @@ describe('codec: writing', () => {
   });
 });
 
+describe('codec: marks and the flanking rules', () => {
+  /** Written once, read back to the same document, written again to the same bytes. */
+  const written = (...content: JSONContent[]): string => {
+    const body = docToMarkdown(doc(para(...content)));
+    expect(docToMarkdown(markdownToDoc(body))).toBe(body);
+    return body;
+  };
+
+  it('uses `*` where `_` cannot work, inside a word', () => {
+    expect(written(text('un'), text('believ', 'italic'), text('able'))).toBe('un*believ*able');
+    expect(written(text('**'), text('a', 'italic'))).toBe('**_a_');
+  });
+
+  it('keeps the text exact when a span cannot be written where it sits, giving up only its edge', () => {
+    expect(written(text('x'), text('(b)', 'italic'), text('y'))).toBe('x(_b_)y');
+    expect(written(text('Note:', 'bold'), text('text'))).toBe('**Note**:text');
+    expect(written(text('a'), text('(', 'bold'), text('b'))).toBe('a(b');
+    expect(written(text('x'), text('code', 'italic', 'code'), text('y'))).toBe('x`code`y');
+    expect(written(text('x'), text('q', 'bold', 'italic'), text('y'))).toBe('x**q**y');
+    expect(written(text('q', 'bold', 'italic'), text('y'))).toBe('**q**y');
+  });
+
+  it('gives up a mark rather than let delimiters that run together read as literal characters', () => {
+    const body = written(text('a', 'bold', 'italic'), text('b', 'italic'), text('c'));
+    expect(body.replace(/[*_]/g, '')).toBe('abc');
+    expect(leaves(paragraphInline(body)).map((leaf) => leaf.text).join('')).toBe('abc');
+  });
+
+  it('writes spans side by side, however their delimiters meet', () => {
+    expect(written(text('a', 'italic'), text('b', 'bold'))).toBe('_a_**b**');
+    expect(written(text('a', 'bold'), text('b', 'italic'))).toBe('**a**_b_');
+    expect(written(text('a', 'bold'), text('b', 'bold', 'italic'))).toBe('**a*b***');
+    expect(written(text('x', 'italic'), text('.'))).toBe('_x_.');
+    expect(written(text('.'), text('x', 'italic'))).toBe('._x_');
+  });
+
+  it('escapes a literal marker only when it would otherwise read as one', () => {
+    expect(written(text('*a* * b'))).toBe('\\*a\\* \\* b');
+    expect(written(text('a * b'))).toBe('a * b');
+    expect(written(text('snake_case'))).toBe('snake_case');
+    expect(written(text('_a_'))).toBe('\\_a\\_');
+  });
+});
+
+describe('codec: front matter', () => {
+  const fence = (language: string, value: string): JSONContent => ({ type: 'codeBlock', attrs: { language }, content: [text(value)] });
+
+  it('opens as a code block, so the editor needs no node of its own', () => {
+    expect(markdownToDoc('---\ntitle: x\n---').content).toEqual([fence('front-matter', 'title: x')]);
+  });
+
+  it('writes back between its `---` lines only as the first block, and only when that reads back the same', () => {
+    expect(docToMarkdown(doc(fence('front-matter', 'title: x'), para(text('b'))))).toBe('---\ntitle: x\n---\n\nb');
+    expect(docToMarkdown(doc(para(), fence('front-matter', 'title: x')))).toBe('---\ntitle: x\n---');
+    for (const body of [
+      docToMarkdown(doc(para(text('b')), fence('front-matter', 'title: x'))),
+      docToMarkdown(doc(fence('front-matter', 'no key'))),
+      docToMarkdown(doc(fence('front-matter', 'title: x\n---\nmore'))),
+      docToMarkdown(doc({ type: 'blockquote', content: [fence('front-matter', 'title: x')] })),
+    ]) {
+      expect(body).toContain('```front-matter');
+      stable(body);
+    }
+  });
+});
+
 describe('codec: comparison helpers', () => {
   it('trims only what each container trims', () => {
     const run = [{ kind: 'text', marks: '', text: '  a  ' }];

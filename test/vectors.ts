@@ -27,5 +27,10 @@ export const CANONICAL: Record<string, string> = {
   mermaid: '```mermaid\ngraph TD\n  A-->B\n```',
   table: '| Name | Count | Note |\n| :--- | ---: | :---: |\n| a | 1 | pipe \\| inside |\n| b | 2 |  |\n| [[D28\\|Decision]] | <@u1> | `a \\| b` |',
   divider: 'Above\n\n---\n\nBelow',
-  escapes: 'snake\\_case\\_name, a \\* b \\* c, C:\\\\Users\\\\ and https\\://not.a.link',
+  escapes: '\\*not emphasis\\* and \\_not either\\_',
+  'stray markers': 'snake_case_name, a * b * c, 2 * 3 and 4 ** 5, glob *.ts and *.md',
+  'marker beside punctuation': 'f(*args, **kwargs)\n\n2*(3+4)*5',
+  'word-inner emphasis': 'un*believ*able and a*b*c',
+  'backslash and link text': 'C:\\Users\\ and https\\://not.a.link',
+  'front matter': '---\ntitle: A page\ntags: [a, b]\n\nnested:\n  key: value\n---\n\n# Title\n\nBody.',
 };

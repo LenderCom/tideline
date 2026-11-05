@@ -1,6 +1,6 @@
 import type { JSONContent } from '@tiptap/core';
-import { isDelimiterRow, type TableAlign } from './inline.js';
-import { parseDocBody, parseDocInline, type DocBlock, type DocCalloutKind, type DocInline, type DocListItem } from './parse.js';
+import { canCloseEmphasis, canOpenEmphasis, charAt, charBefore, isDelimiterRow, isSpaceChar, type TableAlign } from './inline.js';
+import { FRONT_MATTER_KEY, FRONT_MATTER_LANG, parseDocBody, parseDocInline, type DocBlock, type DocCalloutKind, type DocInline, type DocListItem } from './parse.js';
 import { tokenMatcher, type GrammarOptions, type MarkdownPlugin } from './plugin.js';
 
 /**
@@ -22,8 +22,9 @@ import { tokenMatcher, type GrammarOptions, type MarkdownPlugin } from './plugin
  * What the editor can hold that the format cannot is normalised rather than lost silently, and each case is listed where
  * it is handled: a hard break at the end of a paragraph, whitespace before a paragraph's first word, a line in a code
  * block that would close its fence, two lists of the same kind back to back (the format reads them as one), a callout
- * nested in a callout, bold or italic on a code span or link text holding both `*` and `_`, merged table cells, and bold
- * or italic on a plugin's atom (an inline atom holds no marks, because Yjs could not sync them: see `schema.ts`). A code
+ * nested in a callout, bold or italic on a code span or link text holding both `*` and `_`, bold or italic that CommonMark's
+ * flanking rules cannot write where it sits (see `fitMarksToFlanking`), merged table cells, and bold or italic on a plugin's
+ * atom (an inline atom holds no marks, because Yjs could not sync them: see `schema.ts`). A code
  * span that runs across lines is cut where one of its lines would read as a block, or as a blank line, so that the line
  * starts with the next span's fence. One shape is beyond it and is written as best it can be: an inline code span holding
  * two backticks in a row, at the very start of a paragraph line (its fence is three backticks long, which the block
@@ -218,7 +219,7 @@ function joinText(nodes: JSONContent[]): JSONContent[] {
 
 /** Write the editor's document as markdown. Blocks are separated by one blank line; the body ends without a newline. */
 export function docToMarkdown(doc: JSONContent, options: GrammarOptions = {}): string {
-  return writeBlocks(doc.content ?? [], { inCallout: false, plugins: options.plugins ?? [] }).join('\n');
+  return writeBlocks(doc.content ?? [], { inCallout: false, top: true, plugins: options.plugins ?? [] }).join('\n');
 }
 
 interface BlockContext {
@@ -226,6 +227,8 @@ interface BlockContext {
   inCallout: boolean;
   /** This block is the last of its run, so a callout here may be left unclosed: the parser ends it where the run ends. */
   last?: boolean;
+  /** These are the page's own blocks, so the first one can be front matter. */
+  top?: boolean;
   plugins: readonly MarkdownPlugin[];
 }
 
@@ -235,7 +238,8 @@ function writeBlocks(blocks: readonly JSONContent[], context: BlockContext): str
   const nodes = joinAdjacentLists(blocks.filter((block) => block.type !== 'paragraph' || splitAtBlankLines(block.content ?? [], context.plugins).length > 0));
   const out: string[] = [];
   for (const [index, node] of nodes.entries()) {
-    const lines = writeBlock(node, { inCallout: context.inCallout, last: index === nodes.length - 1, plugins: context.plugins });
+    const frontMatter = context.top && index === 0 ? writeFrontMatter(node) : null;
+    const lines = frontMatter ?? writeBlock(node, { inCallout: context.inCallout, last: index === nodes.length - 1, plugins: context.plugins });
     if (lines.length === 0) continue;
     if (out.length > 0) out.push('');
     out.push(...lines);
@@ -336,6 +340,14 @@ function writeFence(lang: string, text: string, context: BlockContext): string[]
   const closes = (line: string): boolean => FENCE_LINE.test(line) || (context.inCallout && CALLOUT_CLOSE.test(line));
   const lines = text === '' ? [] : text.split('\n').map((line) => (closes(line) ? `\u200B${line}` : line));
   return [`\`\`\`${oneLine(lang)}`, ...lines, '```'];
+}
+
+/** Front matter back between its `---` lines, when that reads back as the same block. Anything else is an ordinary fence. */
+function writeFrontMatter(node: JSONContent): string[] | null {
+  if (node.type !== 'codeBlock' || node.attrs?.language !== FRONT_MATTER_LANG) return null;
+  const lines = plainText(node.content).split('\n');
+  if (!FRONT_MATTER_KEY.test(lines[0]) || lines.some((line) => line.trimEnd() === '---')) return null;
+  return ['---', ...lines, '---'];
 }
 
 function splitAtBlankLines(content: readonly JSONContent[], plugins: readonly MarkdownPlugin[]): JSONContent[][] {
@@ -597,14 +609,42 @@ function toPieces(nodes: readonly JSONContent[], options: InlineOptions): Piece[
     }
   }
   // Links and anchor links whose text ended up empty or unwritable degrade to text, so nothing is dropped.
-  return canonicalPieces(options.plugins ?? [], pieces.map((piece): Piece => {
+  return readableMarks(canonicalPieces(options.plugins ?? [], pieces.map((piece): Piece => {
     if (piece.kind === 'anchorLink') {
       // Anchor-link text is read raw (no escapes): brackets, backticks and newlines cannot be written in it.
       const text = piece.text.replace(/[[\]`\n]/g, '');
       return text.trim() ? { ...piece, text } : { kind: 'text', text: piece.text, bold: false, italic: false };
     }
     return piece;
-  }));
+  })), options);
+}
+
+/**
+ * The last resort for marks no spelling can hold, where neighbouring spans' delimiters run together into one marker that no
+ * longer flanks (bold italic, then italic, then a word, all touching). Left alone the delimiters would read as literal
+ * characters and change the text, so one piece gives up a mark, italic first, and failing that the run is written plain.
+ */
+function readableMarks(pieces: Piece[], options: InlineOptions): Piece[] {
+  const marked = (piece: Piece, mark: 'bold' | 'italic'): boolean => isFormatted(piece) && piece[mark];
+  const anyMark = (piece: Piece): boolean => marked(piece, 'bold') || marked(piece, 'italic');
+  // Only spans of different marks can touch; everything else was fitted above. This is on the path of every run, so most stop here.
+  if (!pieces.some((piece, index) => index > 0 && anyMark(piece) && anyMark(pieces[index - 1]))) return pieces;
+  // Read as a run, so a table's pipe escapes (the row reads those, before the cell) stay out of it.
+  const asRun = { ...options, table: false };
+  const reads = (candidate: readonly Piece[]): boolean =>
+    STYLES.some((style) =>
+      sameLeaves(leaves(parseDocInline(renderSpans(candidate, style, asRun, 'bold'), { plugins: options.plugins ?? [] })), leaves(piecesToInline(candidate))),
+    );
+  if (reads(pieces)) return pieces;
+  for (const mark of ['italic', 'bold'] as const) {
+    for (const [index, piece] of pieces.entries()) {
+      if (!marked(piece, mark)) continue;
+      const candidate = settleMarks(shareWhitespaceMarks(pieces.map((other, at) => (at === index ? { ...other, [mark]: false } : other))));
+      if (reads(candidate)) return candidate;
+    }
+  }
+  const plain = joinPieces(pieces.map((piece) => (isFormatted(piece) ? { ...piece, bold: false, italic: false } : piece)));
+  return reads(plain) ? plain : pieces;
 }
 
 /**
@@ -617,32 +657,45 @@ function toPieces(nodes: readonly JSONContent[], options: InlineOptions): Piece[
  * the format cannot mark it.
  */
 function canonicalPieces(plugins: readonly MarkdownPlugin[], pieces: readonly Piece[]): Piece[] {
-  const split: Piece[] = [];
-  for (const piece of pieces) {
-    if ((piece.kind === 'code' || piece.kind === 'link') && (piece.bold || piece.italic)) {
-      split.push({ ...piece, ...markableAs(piece, plugins) });
-    } else if (piece.kind === 'text') {
-      for (const text of piece.text.split(/(\s+)/)) if (text !== '') split.push({ ...piece, text });
-    } else split.push(piece);
-  }
+  const marked = pieces.map((piece) => ((piece.kind === 'code' || piece.kind === 'link') && (piece.bold || piece.italic) ? { ...piece, ...markableAs(piece, plugins) } : piece));
+  return settleMarks(shareWhitespaceMarks(marked));
+}
+
+/** Whitespace takes the marks shared by the content on both sides (see `canonicalPieces`). Text is split at whitespace to do it. */
+function shareWhitespaceMarks(pieces: readonly Piece[]): Piece[] {
+  const split = pieces.flatMap((piece): Piece[] => (piece.kind === 'text' ? piece.text.split(/(\s+)/).filter((text) => text !== '').map((text) => ({ ...piece, text })) : [piece]));
   const marksOf = (piece: Piece | undefined): { bold: boolean; italic: boolean } =>
     piece && isFormatted(piece) ? { bold: piece.bold, italic: piece.italic } : { bold: false, italic: false };
   const isSpace = (piece: Piece | undefined): boolean => piece?.kind === 'text' && piece.text.trim() === '';
+  return split.map((piece, index) => {
+    if (!isSpace(piece)) return piece;
+    let before = index - 1;
+    while (before >= 0 && isSpace(split[before])) before -= 1;
+    let after = index + 1;
+    while (after < split.length && isSpace(split[after])) after += 1;
+    const left = marksOf(split[before]);
+    const right = marksOf(split[after]);
+    return { ...(piece as Formatted), bold: left.bold && right.bold, italic: left.italic && right.italic };
+  });
+}
+
+/** Fit the marks to the flanking rules. Each mark given up can change what the whitespace beside it shares, so it repeats until nothing changes. */
+function settleMarks(pieces: readonly Piece[]): Piece[] {
+  let current = joinPieces(pieces);
+  for (let fitted = fitMarksToFlanking(current); fitted !== current; fitted = fitMarksToFlanking(current)) {
+    current = joinPieces(shareWhitespaceMarks(fitted));
+  }
+  return current;
+}
+
+/**
+ * Text with the same marks joins; so does code, and a link to one place, which the format would otherwise write as two
+ * spans that the editor joins on the way back.
+ */
+function joinPieces(pieces: readonly Piece[]): Piece[] {
   const out: Piece[] = [];
-  split.forEach((piece, index) => {
-    let next = piece;
-    if (isSpace(piece)) {
-      let before = index - 1;
-      while (before >= 0 && isSpace(split[before])) before -= 1;
-      let after = index + 1;
-      while (after < split.length && isSpace(split[after])) after += 1;
-      const left = marksOf(split[before]);
-      const right = marksOf(split[after]);
-      next = { ...(piece as Formatted), bold: left.bold && right.bold, italic: left.italic && right.italic };
-    }
+  for (const next of pieces) {
     const prev = out[out.length - 1];
-    // Text with the same marks joins; so does code, and a link to one place, which the format would otherwise write as two
-    // spans that the editor joins on the way back.
     const sameMarks = prev !== undefined && isFormatted(prev) && isFormatted(next) && prev.bold === next.bold && prev.italic === next.italic;
     const joins =
       sameMarks &&
@@ -650,8 +703,84 @@ function canonicalPieces(plugins: readonly MarkdownPlugin[], pieces: readonly Pi
       (next.kind === 'text' || next.kind === 'code' || (next.kind === 'link' && prev.kind === 'link' && prev.href === next.href));
     if (joins) (prev as { text: string }).text += (next as { text: string }).text;
     else out.push({ ...next });
-  });
+  }
   return out;
+}
+
+/** What a piece writes first and last, as the flanking rules see it. A link counts as bracketed: a bare one may not survive. */
+function edgeChars(piece: Piece): { first: string; last: string } {
+  switch (piece.kind) {
+    case 'text':
+    case 'atom':
+      return { first: charAt(piece.text, 0), last: charBefore(piece.text, piece.text.length) };
+    case 'break':
+      return { first: '\n', last: '\n' };
+    case 'code':
+      return { first: '`', last: '`' };
+    case 'pageLink':
+      return { first: '[', last: ']' };
+    case 'image':
+      return { first: '!', last: ')' };
+    default:
+      return { first: '[', last: ')' };
+  }
+}
+
+// With the whitespace beside it, which a span's edge never holds.
+const LEADING_PUNCTUATION = /^[\p{P}\p{S}]+\s*/u;
+const TRAILING_PUNCTUATION = /\s*[\p{P}\p{S}]+$/u;
+
+/**
+ * CommonMark cannot write every span: a marker between a word and punctuation is not a delimiter, so no spelling makes
+ * `(b)` italic in `a(b)c`, or bold `Note:` directly before a word. Such a span gives up what it must for the text to stay
+ * exactly as typed. Text at its edge gives up the punctuation (`a(_b_)c`), and a code span or link, which cannot be cut,
+ * gives up the mark. Two marks starting or ending together beside a word (`x` then bold italic `y`) leave no spelling
+ * either, because the inner delimiter is itself punctuation, so italic is given up first, as in `markableAs`.
+ *
+ * Checked with `*`, the more permissive marker: if it cannot work, `_` cannot.
+ */
+function fitMarksToFlanking(pieces: Piece[]): Piece[] {
+  if (!pieces.some((piece) => isFormatted(piece) && (piece.bold || piece.italic))) return pieces;
+  const out = [...pieces];
+  let changed = false;
+  const marks = (piece: Piece): Array<'bold' | 'italic'> => (isFormatted(piece) ? (['bold', 'italic'] as const).filter((mark) => piece[mark]) : []);
+  /** Take `lost` off a piece's edge punctuation, or off the whole piece when it holds nothing else or cannot be cut. */
+  const giveUp = (index: number, lost: Array<'bold' | 'italic'>, edge: RegExp): void => {
+    const piece = out[index] as Formatted;
+    const without = Object.fromEntries(lost.map((mark) => [mark, false]));
+    const part = piece.kind === 'text' && lost.length === 1 ? edge.exec(piece.text)?.[0] : undefined;
+    if (part === undefined || part === (piece as { text: string }).text) {
+      out[index] = { ...piece, ...without };
+      return;
+    }
+    const text = (piece as { text: string }).text;
+    const shed = { ...piece, ...without, text: part };
+    const rest = { ...piece, text: edge === LEADING_PUNCTUATION ? text.slice(part.length) : text.slice(0, -part.length) };
+    out.splice(index, 1, ...(edge === LEADING_PUNCTUATION ? [shed, rest] : [rest, shed]));
+  };
+  // Every change takes a mark off or cuts off punctuation that then holds fewer marks, so this ends.
+  for (let index = 0; index + 1 < out.length; ) {
+    const before = out[index];
+    const after = out[index + 1];
+    const beforeMarks = marks(before);
+    const afterMarks = marks(after);
+    const closing = beforeMarks.filter((mark) => !afterMarks.includes(mark));
+    const opening = afterMarks.filter((mark) => !beforeMarks.includes(mark));
+    const last = edgeChars(before).last;
+    const first = edgeChars(after).first;
+    // A span's edge whitespace is written outside it, and whichever span ends or starts first puts its marker between.
+    const opens = opening.length === 0 || isSpaceChar(first) || canOpenEmphasis('*', closing.length > 0 ? '*' : last, opening.length === 2 ? '*' : first);
+    const closes = closing.length === 0 || isSpaceChar(last) || canCloseEmphasis('*', closing.length === 2 ? '*' : last, opening.length > 0 ? '*' : first);
+    if (opens && closes) {
+      index += 1;
+      continue;
+    }
+    changed = true;
+    if (!opens) giveUp(index + 1, opening.length === 2 ? ['italic'] : opening, LEADING_PUNCTUATION);
+    else giveUp(index, closing.length === 2 ? ['italic'] : closing, TRAILING_PUNCTUATION);
+    index = Math.max(0, index - 1);
+  }
+  return changed ? out : pieces;
 }
 
 /**
@@ -742,24 +871,38 @@ function isFormatted(piece: Piece): piece is Formatted {
   return 'bold' in piece;
 }
 
-function renderSpans(pieces: readonly Piece[], style: InlineStyle, options: InlineOptions, mark: 'bold' | 'italic' | null): string {
+/** The characters written either side of a span, which decide whether its delimiters read as delimiters. */
+interface SpanEdges {
+  before: string;
+  after: string;
+}
+
+const NO_EDGES: SpanEdges = { before: '', after: '' };
+/** Inside another span, its delimiter is what sits beside this one. */
+const INSIDE_SPAN: SpanEdges = { before: '*', after: '*' };
+
+function renderSpans(pieces: readonly Piece[], style: InlineStyle, options: InlineOptions, mark: 'bold' | 'italic' | null, edges: SpanEdges = NO_EDGES): string {
   if (mark === null) return pieces.map((piece, index) => renderPiece(piece, style, options, pieces[index + 1])).join('');
   let out = '';
   let index = 0;
+  const around = (end: number): SpanEdges => ({
+    before: out === '' ? edges.before : charBefore(out, out.length),
+    after: end < pieces.length ? (nextLeadChar(pieces[end]) ?? '') : edges.after,
+  });
   while (index < pieces.length) {
     const piece = pieces[index];
     if (!isFormatted(piece) || !piece[mark]) {
       // A run without this mark, rendered for the next mark in.
       let end = index;
       while (end < pieces.length && !(isFormatted(pieces[end]) && (pieces[end] as Formatted)[mark])) end += 1;
-      out += renderSpans(pieces.slice(index, end), style, options, mark === 'bold' ? 'italic' : null);
+      out += renderSpans(pieces.slice(index, end), style, options, mark === 'bold' ? 'italic' : null, around(end));
       index = end;
       continue;
     }
     let end = index;
     while (end < pieces.length && isFormatted(pieces[end]) && (pieces[end] as Formatted)[mark] && pieces[end].kind !== 'break') end += 1;
     const inner = pieces.slice(index, end).map((p) => ({ ...(p as Formatted), [mark]: false }));
-    out += wrapRun(inner, mark, style, options);
+    out += wrapRun(inner, mark, style, options, around(end));
     index = end;
   }
   return out;
@@ -770,16 +913,19 @@ function renderSpans(pieces: readonly Piece[], style: InlineStyle, options: Inli
  * both `*` and `_`), it is written as adjacent spans: first parts that each avoid one delimiter, then one span per
  * piece. Adjacent spans read back as one run. Only content no span can hold is left unmarked.
  */
-function wrapRun(inner: readonly Formatted[], mark: 'bold' | 'italic', style: InlineStyle, options: InlineOptions): string {
-  const render = (part: readonly Formatted[]): string => renderSpans(part, style, options, mark === 'bold' ? 'italic' : null);
+function wrapRun(inner: readonly Formatted[], mark: 'bold' | 'italic', style: InlineStyle, options: InlineOptions, edges: SpanEdges): string {
+  const render = (part: readonly Formatted[]): string => renderSpans(part, style, options, mark === 'bold' ? 'italic' : null, INSIDE_SPAN);
   const whole = render(inner);
-  const wrapped = delimit(whole, mark, options.plugins ?? []);
+  const wrapped = delimit(whole, mark, options.plugins ?? [], edges);
   if (wrapped !== whole || whole.trim() === '') return wrapped;
   const attempt = (parts: readonly Formatted[][]): string | null => {
     let out = '';
-    for (const part of parts) {
+    for (const [index, part] of parts.entries()) {
       const content = render(part);
-      const span = delimit(content, mark, options.plugins ?? []);
+      const span = delimit(content, mark, options.plugins ?? [], {
+        before: out === '' ? edges.before : charBefore(out, out.length),
+        after: index === parts.length - 1 ? edges.after : '*',
+      });
       if (span === content && content.trim() !== '') return null;
       out += span;
     }
@@ -826,19 +972,22 @@ function splitByDelimiters(pieces: readonly Formatted[]): Formatted[][] {
 }
 
 /**
- * Wrap a span. Emphasis bodies cannot hold their own delimiter at all (`*([^*\n]+)*`), and a strong body is lazy (it
- * closes at the first `**`), so the delimiter is the one the content does not trip; content that trips both is written
- * without the mark rather than with a broken one. Edge whitespace is written outside the span, and a span of only
- * whitespace bare: bold or italic whitespace looks like any other.
+ * Wrap a span. The delimiter is the one that reads as a delimiter between the characters around it (`_` does not work
+ * inside a word) and that the content does not close early; content that trips both is written without the mark rather
+ * than with a broken one. Edge whitespace is written outside the span, and a span of only whitespace bare: bold or
+ * italic whitespace looks like any other.
  */
-function delimit(content: string, mark: 'bold' | 'italic', plugins: readonly MarkdownPlugin[]): string {
+function delimit(content: string, mark: 'bold' | 'italic', plugins: readonly MarkdownPlugin[], edges: SpanEdges = NO_EDGES): string {
   // Whitespace at a span's edges goes outside it: `* a *` at the start of a line would read as a list item.
   const lead = /^\s*/.exec(content)?.[0] ?? '';
   const core = content.slice(lead.length).replace(/\s+$/, '');
   const trail = content.slice(lead.length + core.length);
   if (core === '') return content;
   const candidates = mark === 'bold' ? ['**', '__'] : ['_', '*'];
+  const before = lead === '' ? edges.before : charBefore(lead, lead.length);
+  const after = trail === '' ? edges.after : charAt(trail, 0);
   for (const delim of candidates) {
+    if (!canOpenEmphasis(delim[0], before, charAt(core, 0)) || !canCloseEmphasis(delim[0], charBefore(core, core.length), after)) continue;
     const body = `${delim}${core}${delim}`;
     const [token, ...rest] = parseDocInline(body, { plugins });
     if (rest.length === 0 && token?.kind === (mark === 'bold' ? 'strong' : 'emphasis')) return `${lead}${body}${trail}`;
@@ -878,11 +1027,11 @@ function nextLeadChar(next: Piece | undefined): string | undefined {
   if (isFormatted(next) && (next.bold || next.italic)) return '*';
   switch (next.kind) {
     case 'text':
-      return next.text[0];
+      return charAt(next.text, 0);
     case 'code':
       return '`';
     case 'atom':
-      return next.text[0];
+      return charAt(next.text, 0);
     case 'image':
       return '!';
     default:

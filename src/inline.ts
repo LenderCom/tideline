@@ -36,12 +36,9 @@ export type TableAlign = 'left' | 'center' | 'right' | 'none';
  *  3. A `[[page]]` or `[[target|label]]` link, before the bracketed link that would otherwise read its `[`. Then a
  *     bracketed link, then a bare autolink, both https-only. A label may carry escaped punctuation (`\[`, `\]`), as
  *     GFM allows, and reads unescaped.
- *  4. Strong before emphasis, so `**x**` is not read as an emphasis of `*x*`.
+ *  4. A run of `*` or `_`, which may turn out to be emphasis or a literal character (see `parseInline`).
  *  5. A backslash escape (`\_`, `\*`, `\[`): the punctuation reads as itself. `\:` is in the set, as in CommonMark, so
  *     a writer can spell a literal `https:` or a line starting `:::`.
- *
- * Emphasis bodies refuse newlines: an unpaired `*` in a multi-line note would otherwise swallow everything to the next
- * one, several lines away, and italicize a paragraph nobody marked up.
  */
 function inlineSource(options: GrammarOptions): string {
   return [
@@ -50,10 +47,7 @@ function inlineSource(options: GrammarOptions): string {
     '\\[\\[(?<target>[^\\[\\]\\n|]+?)(?:\\|(?<label>[^\\[\\]\\n]+?))?\\]\\]',
     '\\[(?<linkText>(?:\\\\[\\\\`*_{}\\[\\]()<>#+\\-.!|~:]|[^\\]\\\\\\n])+)\\]\\((?<href>https:\\/\\/[^\\s)]+)\\)',
     '(?<auto>https:\\/\\/[^\\s<>()\\[\\]\'"]*[^\\s<>()\\[\\].,;:!?\'"])',
-    '\\*\\*(?<strongStar>[^\\n]+?)\\*\\*',
-    '__(?<strongUnder>[^\\n]+?)__',
-    '\\*(?<emStar>[^*\\n]+)\\*',
-    '_(?<emUnder>[^_\\n]+)_',
+    '(?<run>\\*+|_+)',
     '\\\\(?<escaped>[\\\\`*_{}\\[\\]()<>#+\\-.!|~:])',
   ].join('|');
 }
@@ -61,28 +55,128 @@ function inlineSource(options: GrammarOptions): string {
 /** The same set the escape branch reads as itself: unescaped inside a link label, which renders as plain text. */
 const ESCAPED_PUNCTUATION = /\\([\\`*_{}[\]()<>#+\-.!|~:])/g;
 
+const SPACE = /^\s$/u;
+const PUNCTUATION = /^[\p{P}\p{S}]$/u;
+
+/** The character before a position, whole when it is a surrogate pair; empty at the start of the text. */
+export function charBefore(text: string, index: number): string {
+  if (index <= 0) return '';
+  const pair = index >= 2 ? text.codePointAt(index - 2) : undefined;
+  return pair !== undefined && pair > 0xffff ? text.slice(index - 2, index) : text[index - 1];
+}
+
+/** The character at a position, whole when it is a surrogate pair; empty at the end of the text. */
+export function charAt(text: string, index: number): string {
+  const point = text.codePointAt(index);
+  return point === undefined ? '' : String.fromCodePoint(point);
+}
+
+export const isSpaceChar = (char: string): boolean => char === '' || SPACE.test(char);
+export const isPunctuationChar = (char: string): boolean => PUNCTUATION.test(char);
+
+function leftFlanking(before: string, after: string): boolean {
+  return !isSpaceChar(after) && (!isPunctuationChar(after) || isSpaceChar(before) || isPunctuationChar(before));
+}
+
+function rightFlanking(before: string, after: string): boolean {
+  return !isSpaceChar(before) && (!isPunctuationChar(before) || isSpaceChar(after) || isPunctuationChar(after));
+}
+
 /**
- * Recursion is bounded by construction: every nested call parses a STRICTLY shorter slice (the
- * delimiters are consumed), so a pathological body cannot spin here.
+ * CommonMark's flanking rules: whether a run of `*` or `_` between these two characters can open emphasis. The edge of
+ * the text counts as whitespace. So a run with a space after it is a literal character, and `_` does not open inside a word.
+ */
+export function canOpenEmphasis(marker: string, before: string, after: string): boolean {
+  return leftFlanking(before, after) && (marker === '*' || !rightFlanking(before, after) || isPunctuationChar(before));
+}
+
+/** The same for closing: a run with a space before it is a literal character, and `_` does not close inside a word. */
+export function canCloseEmphasis(marker: string, before: string, after: string): boolean {
+  return rightFlanking(before, after) && (marker === '*' || !leftFlanking(before, after) || isPunctuationChar(after));
+}
+
+type EmphasisKind = 'strong' | 'emphasis';
+
+/** One run of `*` or `_` while a line is scanned: how much of it is unpaired, and the spans it has opened and closed. */
+interface MarkerRun {
+  kind: 'run';
+  marker: string;
+  size: number;
+  left: number;
+  index: number;
+  canOpen: boolean;
+  canClose: boolean;
+  opens: EmphasisKind[];
+  closes: EmphasisKind[];
+}
+
+/**
+ * How many runs may wait to be closed at once. It bounds how deep emphasis can nest, so a pathological body cannot
+ * overflow the stack of whatever walks the tree, and it keeps the pairing linear.
+ */
+const MAX_OPEN_RUNS = 32;
+
+/** CommonMark's rule of three: a run that can both open and close does not pair where the two sizes add to a multiple of 3. */
+function ruleOfThree(opener: MarkerRun, closer: MarkerRun): boolean {
+  return (opener.canClose || closer.canOpen) && (opener.size + closer.size) % 3 === 0 && (opener.size % 3 !== 0 || closer.size % 3 !== 0);
+}
+
+/**
+ * Pair a run with the runs waiting on its marker, nearest first. What waited between the two can no longer pair, so a
+ * crossing (`*a _b* c_`) leaves the inner marker literal.
+ */
+function pairRun(run: MarkerRun, waiting: Record<string, MarkerRun[]>): void {
+  const stack = waiting[run.marker];
+  if (run.canClose) {
+    let at = stack.length - 1;
+    while (run.left > 0 && at >= 0) {
+      const opener = stack[at];
+      if (ruleOfThree(opener, run)) {
+        at -= 1;
+        continue;
+      }
+      const used = opener.left >= 2 && run.left >= 2 ? 2 : 1;
+      const kind: EmphasisKind = used === 2 ? 'strong' : 'emphasis';
+      opener.opens.push(kind);
+      run.closes.push(kind);
+      opener.left -= used;
+      run.left -= used;
+      stack.length = opener.left > 0 ? at + 1 : at;
+      for (const other of Object.values(waiting)) {
+        while (other.length > 0 && other[other.length - 1].index > opener.index) other.pop();
+      }
+      at = stack.length - 1;
+    }
+  }
+  const open = Object.values(waiting).reduce((sum, list) => sum + list.length, 0);
+  if (run.canOpen && run.left > 0 && open < MAX_OPEN_RUNS) stack.push(run);
+}
+
+/**
+ * One inline run as a token tree. The scanner reads its tokens in one pass and pairs the `*` and `_` runs as it meets
+ * them, the way CommonMark's delimiter stack does; a run that never pairs reads as the literal characters it is.
  *
- * The matcher is built PER CALL rather than hoisted to a module constant: a `g` regex carries
- * `lastIndex` on the object itself, so one shared instance would have an emphasis body's nested
- * scan rewind the outer scan's cursor mid-loop — the same run of text re-tokenized forever.
+ * Emphasis does not run across a line: an unpaired `*` in a multi-line note would otherwise swallow everything to the
+ * next one, several lines away, and italicize a paragraph nobody marked up.
+ *
+ * The matcher is built PER CALL rather than hoisted to a module constant: a `g` regex carries `lastIndex` on the object
+ * itself, so a shared instance is one re-entrant call away from rewinding another scan's cursor.
  */
 export function parseInline(text: string, options: GrammarOptions = {}): Inline[] {
   const plugins = options.plugins ?? [];
   plugins.forEach(tokenMatcher);
   const pattern = new RegExp(inlineSource(options), 'g');
-  const out: Inline[] = [];
+  const items: Array<Inline | MarkerRun> = [];
+  const waiting: Record<string, MarkerRun[]> = { '*': [], _: [] };
   let cursor = 0;
 
+  // A token or a stretch of text that holds a line break ends every span still waiting to close.
+  const pushItem = (item: Inline, source: string): void => {
+    items.push(item);
+    if (source.includes('\n')) for (const list of Object.values(waiting)) list.length = 0;
+  };
   const pushText = (value: string): void => {
-    if (value === '') return;
-    const last = out[out.length - 1];
-    // Coalesce, so a body that produced no markup at all is ONE text node rather than a run of
-    // adjacent ones — which keeps the rendered DOM (and every test's `textContent`) simple.
-    if (last?.kind === 'text') last.text += value;
-    else out.push({ kind: 'text', text: value });
+    if (value !== '') pushItem({ kind: 'text', text: value }, value);
   };
 
   for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
@@ -99,32 +193,71 @@ export function parseInline(text: string, options: GrammarOptions = {}): Inline[
     if (groups.code !== undefined) {
       // Markdown's own rule: one leading + trailing space inside a code span is padding that
       // lets the span start or end with a backtick, not content.
-      out.push({ kind: 'code', text: stripCodePadding(groups.code) });
+      pushItem({ kind: 'code', text: stripCodePadding(groups.code) }, match[0]);
     } else if (atomIndex >= 0) {
       const attrs = plugins[atomIndex].read(match[0]);
       if (attrs === null) pushText(match[0]);
-      else out.push({ kind: 'atom', type: plugins[atomIndex].type, attrs, text: match[0] });
+      else pushItem({ kind: 'atom', type: plugins[atomIndex].type, attrs, text: match[0] }, match[0]);
     } else if (groups.target !== undefined) {
       const target = groups.target.trim();
       const label = groups.label?.trim();
       // A link whose target is blank (`[[ ]]`) names nothing: it reads as typed.
       if (target === '') pushText(match[0]);
-      else out.push({ kind: 'pageLink', target, ...(label ? { label } : {}) });
+      else pushItem({ kind: 'pageLink', target, ...(label ? { label } : {}) }, match[0]);
     } else if (groups.linkText !== undefined && groups.href !== undefined) {
-      out.push({ kind: 'link', href: groups.href, text: groups.linkText.replace(ESCAPED_PUNCTUATION, '$1') });
+      pushItem({ kind: 'link', href: groups.href, text: groups.linkText.replace(ESCAPED_PUNCTUATION, '$1') }, match[0]);
     } else if (groups.auto !== undefined) {
-      out.push({ kind: 'link', href: groups.auto, text: groups.auto });
-    } else if (groups.strongStar !== undefined || groups.strongUnder !== undefined) {
-      out.push({ kind: 'strong', children: parseInline(groups.strongStar ?? groups.strongUnder ?? '', options) });
-    } else if (groups.emStar !== undefined || groups.emUnder !== undefined) {
-      out.push({ kind: 'emphasis', children: parseInline(groups.emStar ?? groups.emUnder ?? '', options) });
+      pushItem({ kind: 'link', href: groups.auto, text: groups.auto }, match[0]);
+    } else if (groups.run !== undefined) {
+      const marker = groups.run[0];
+      const before = charBefore(text, match.index);
+      const after = charAt(text, cursor);
+      const run: MarkerRun = {
+        kind: 'run',
+        marker,
+        size: groups.run.length,
+        left: groups.run.length,
+        index: items.length,
+        canOpen: canOpenEmphasis(marker, before, after),
+        canClose: canCloseEmphasis(marker, before, after),
+        opens: [],
+        closes: [],
+      };
+      pairRun(run, waiting);
+      items.push(run);
     } else if (groups.escaped !== undefined) {
       pushText(groups.escaped);
     }
   }
 
   pushText(text.slice(cursor));
-  return out;
+  return buildTree(items);
+}
+
+/** The scanned items as a tree: each run closes its spans, leaves what never paired as text, then opens its spans. */
+function buildTree(items: ReadonlyArray<Inline | MarkerRun>): Inline[] {
+  const frames: Inline[][] = [[]];
+  const push = (node: Inline): void => {
+    const top = frames[frames.length - 1];
+    const last = top[top.length - 1];
+    // Coalesce, so a body that produced no markup at all is ONE text node rather than a run of
+    // adjacent ones — which keeps the rendered DOM (and every test's `textContent`) simple.
+    if (node.kind === 'text' && last?.kind === 'text') last.text += node.text;
+    else top.push(node);
+  };
+  for (const item of items) {
+    if (item.kind !== 'run') {
+      push(item);
+      continue;
+    }
+    for (const kind of item.closes) {
+      const children = frames.pop() ?? [];
+      push({ kind, children });
+    }
+    if (item.left > 0) push({ kind: 'text', text: item.marker.repeat(item.left) });
+    for (let count = item.opens.length; count > 0; count -= 1) frames.push([]);
+  }
+  return frames[0];
 }
 
 function stripCodePadding(value: string): string {

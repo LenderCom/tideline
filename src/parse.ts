@@ -14,7 +14,8 @@ import type { GrammarOptions } from './plugin.js';
  *  · `![alt](attachment:<id>)` and `![alt](https://…)` images;
  *  · `[label](attachment:<id>)` links to a file your application holds, read as a `link` whose `href` is the reference;
  *  · `[text](#anchor)` links within the page.
- * A ```` ```mermaid ```` fence is a code block with that language; the codec opens it as a `mermaid` node.
+ * A ```` ```mermaid ```` fence is a code block with that language; the codec opens it as a `mermaid` node. Front matter
+ * at the very start of a body is a code block too, with the language `FRONT_MATTER_LANG`, so its text is kept verbatim.
  */
 
 /** One inline run: the inline grammar's tokens, plus the ones only a page carries. */
@@ -59,6 +60,13 @@ const THEMATIC_BREAK = /^ {0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*$/;
 const CALLOUT_OPEN = /^ {0,3}:::\s*([A-Za-z]+)\s*(.*)$/;
 const CALLOUT_CLOSE = /^ {0,3}:::\s*$/;
 const TASK_MARKER = /^\[( |x|X)\]\s+/;
+/** How far a line is indented to read as code, once it is not carrying on a paragraph. */
+const CODE_INDENT = 4;
+
+/** The language of the code block that holds a body's front matter. The codec writes it back between `---` lines. */
+export const FRONT_MATTER_LANG = 'front-matter';
+/** The first line front matter must have: without it, `---` at the top of a body is an ordinary divider. */
+export const FRONT_MATTER_KEY = /^[A-Za-z_][\w-]*:(?:\s|$)/;
 
 const CALLOUT_KINDS: Readonly<Record<string, DocCalloutKind>> = {
   note: 'note',
@@ -94,7 +102,17 @@ export function attachmentIdOf(ref: string): string | null {
 
 /** Parse a page body into blocks. Total: any input renders, nothing throws. */
 export function parseDocBody(body: string, options: GrammarOptions = {}): DocBlock[] {
-  return parseBlocks(body.replace(/\r\n?/g, '\n').split('\n'), new Map(), options);
+  const lines = body.replace(/\r\n?/g, '\n').split('\n');
+  const ids = new Map<string, number>();
+  const close = frontMatterEnd(lines);
+  if (close < 0) return parseBlocks(lines, ids, options);
+  return [{ kind: 'code', lang: FRONT_MATTER_LANG, text: lines.slice(1, close).join('\n') }, ...parseBlocks(lines.slice(close + 1), ids, options)];
+}
+
+/** The line that closes the front matter at the start of a body, or -1 when the body does not start with any. */
+function frontMatterEnd(lines: readonly string[]): number {
+  if (lines[0].trimEnd() !== '---' || !FRONT_MATTER_KEY.test(lines[1] ?? '')) return -1;
+  return lines.findIndex((line, index) => index > 1 && line.trimEnd() === '---');
 }
 
 /** The id a heading gets without an explicit `{#anchor}`: lowercase words joined by hyphens. */
@@ -239,7 +257,7 @@ function dedent(line: string, width: number): string {
  * fences, a list item its first line), so recursion is bounded however the body is shaped. `ids` is shared across the
  * whole page so two headings with the same text still get distinct anchors.
  */
-function parseBlocks(lines: string[], ids: Map<string, number>, options: GrammarOptions): DocBlock[] {
+function parseBlocks(lines: string[], ids: Map<string, number>, options: GrammarOptions, inListItem = false): DocBlock[] {
   const blocks: DocBlock[] = [];
   let paragraph: string[] = [];
 
@@ -258,6 +276,25 @@ function parseBlocks(lines: string[], ids: Map<string, number>, options: Grammar
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
+
+    // A list item's own lines are read leniently, as they were written by hand: a sub-list or fence indented too far is
+    // still that, and the line right under the item carries on its paragraph.
+    const lenient = inListItem && (index === 0 || LIST_ITEM.test(line) || FENCE_LINE.test(line));
+    if (paragraph.length === 0 && line.trim() !== '' && indentOf(line) >= CODE_INDENT && !lenient) {
+      const body: string[] = [];
+      while (index < lines.length && (lines[index].trim() === '' || indentOf(lines[index]) >= CODE_INDENT)) {
+        body.push(dedent(lines[index], CODE_INDENT));
+        index += 1;
+      }
+      index -= 1;
+      // Blank lines after the last indented line are between blocks, not code.
+      while (body[body.length - 1].trim() === '') {
+        body.pop();
+        index -= 1;
+      }
+      blocks.push({ kind: 'code', text: body.join('\n') });
+      continue;
+    }
 
     const fence = FENCE_LINE.exec(line);
     if (fence) {
@@ -413,7 +450,7 @@ function parseList(lines: string[], start: number, ids: Map<string, number>, blo
     items.push({
       inline: parseDocInline(text, options),
       ...(task ? { checked: task[1] !== ' ' } : {}),
-      children: parseBlocks(body, ids, options),
+      children: parseBlocks(body, ids, options, true),
     });
     // A blank line between two items of the same list keeps the list going.
     if (index < lines.length && lines[index].trim() === '') {
