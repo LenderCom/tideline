@@ -58,6 +58,11 @@ export const MARKDOWN_MARKS = ['bold', 'italic', 'code', 'link'] as const;
 
 type Mark = NonNullable<JSONContent['marks']>[number];
 
+/** `out.push(...items)` passes every item as an argument, and a long enough list (a large page's) overflows the stack. */
+function pushAll<T>(out: T[], items: readonly T[]): void {
+  for (const item of items) out.push(item);
+}
+
 // ─── markdown → editor───────────────────────────────────────────────────────────────────────────────────────────────
 
 /** Read a page body into the editor's document. Total, like the parser it rests on. */
@@ -179,10 +184,10 @@ function inlineToNodes(nodes: readonly DocInline[], marks: Mark[] = []): JSONCon
         break;
       // Emphasis inside emphasis (`*a _b_ c*`) is still just italic: a mark is held once.
       case 'strong':
-        out.push(...inlineToNodes(node.children, withMark(marks, 'bold')));
+        pushAll(out, inlineToNodes(node.children, withMark(marks, 'bold')));
         break;
       case 'emphasis':
-        out.push(...inlineToNodes(node.children, withMark(marks, 'italic')));
+        pushAll(out, inlineToNodes(node.children, withMark(marks, 'italic')));
         break;
       // A plugin's token takes no marks (an inline atom; see `schema.ts`): bold around one opens it plain.
       case 'atom':
@@ -219,7 +224,7 @@ function joinText(nodes: JSONContent[]): JSONContent[] {
 
 /** Write the editor's document as markdown. Blocks are separated by one blank line; the body ends without a newline. */
 export function docToMarkdown(doc: JSONContent, options: GrammarOptions = {}): string {
-  return writeBlocks(doc.content ?? [], { inCallout: false, top: true, plugins: options.plugins ?? [] }).join('\n');
+  return writeBlocks(doc.content ?? [], { inCallout: false, top: true, plugins: options.plugins ?? [], repairs: markRepairs() }).join('\n');
 }
 
 interface BlockContext {
@@ -230,6 +235,7 @@ interface BlockContext {
   /** These are the page's own blocks, so the first one can be front matter. */
   top?: boolean;
   plugins: readonly MarkdownPlugin[];
+  repairs: MarkRepairs;
 }
 
 /** The lines of a run of blocks, a blank line between each pair. */
@@ -239,10 +245,10 @@ function writeBlocks(blocks: readonly JSONContent[], context: BlockContext): str
   const out: string[] = [];
   for (const [index, node] of nodes.entries()) {
     const frontMatter = context.top && index === 0 ? writeFrontMatter(node) : null;
-    const lines = frontMatter ?? writeBlock(node, { inCallout: context.inCallout, last: index === nodes.length - 1, plugins: context.plugins });
+    const lines = frontMatter ?? writeBlock(node, { inCallout: context.inCallout, last: index === nodes.length - 1, plugins: context.plugins, repairs: context.repairs });
     if (lines.length === 0) continue;
     if (out.length > 0) out.push('');
-    out.push(...lines);
+    pushAll(out, lines);
   }
   return out;
 }
@@ -266,20 +272,20 @@ function writeBlock(node: JSONContent, context: BlockContext): string[] {
   switch (node.type) {
     case 'paragraph':
       // A blank line inside a paragraph (two breaks, or a line of only spaces) ends it in the format, so it is written as two.
-      return splitAtBlankLines(node.content ?? [], context.plugins).flatMap((part, index) => [...(index > 0 ? [''] : []), ...writeParagraph(part, context.plugins, context.inCallout)]);
+      return splitAtBlankLines(node.content ?? [], context.plugins).flatMap((part, index) => [...(index > 0 ? [''] : []), ...writeParagraph(part, context)]);
     case 'heading':
-      return [writeHeading(node, context.plugins)];
+      return [writeHeading(node, context)];
     case 'codeBlock':
       return writeFence(String(node.attrs?.language ?? '').trim(), plainText(node.content), context);
     case 'mermaid':
       return writeFence('mermaid', plainText(node.content), context);
     case 'blockquote': {
       // The quote marker resets the callout context: `> :::` is not a line a callout's closing check can see.
-      const lines = writeBlocks(node.content ?? [], { inCallout: false, plugins: context.plugins }).map((line) => (line === '' ? '>' : `> ${line}`));
+      const lines = writeBlocks(node.content ?? [], { inCallout: false, plugins: context.plugins, repairs: context.repairs }).map((line) => (line === '' ? '>' : `> ${line}`));
       return lines.length > 0 ? lines : ['>'];
     }
     case 'callout': {
-      const inner = writeBlocks(node.content ?? [], { inCallout: true, plugins: context.plugins });
+      const inner = writeBlocks(node.content ?? [], { inCallout: true, plugins: context.plugins, repairs: context.repairs });
       const kind = calloutKind(node.attrs?.kind);
       const title = oneLine(String(node.attrs?.title ?? '')).trim();
       const open = `:::${kind}${title ? ` ${title}` : ''}`;
@@ -293,12 +299,12 @@ function writeBlock(node: JSONContent, context: BlockContext): string[] {
     case 'orderedList':
       return writeList(node, context);
     case 'table':
-      return writeTable(node, context.plugins);
+      return writeTable(node, context);
     case 'horizontalRule':
       return ['---'];
     default:
       // Not a block of the format (nothing in the schema produces one): keep its text rather than drop it.
-      return writeParagraph([{ type: 'text', text: plainText(node.content) }], context.plugins);
+      return writeParagraph([{ type: 'text', text: plainText(node.content) }], { ...context, inCallout: false });
   }
 }
 
@@ -308,7 +314,7 @@ function calloutKind(value: unknown): DocCalloutKind {
   return CALLOUT_KINDS.includes(value as DocCalloutKind) ? (value as DocCalloutKind) : 'note';
 }
 
-function writeHeading(node: JSONContent, plugins: readonly MarkdownPlugin[]): string {
+function writeHeading(node: JSONContent, { plugins, repairs }: BlockContext): string {
   const level = Math.min(Math.max(Number(node.attrs?.level) || 1, 1), 6);
   const anchor = validAnchor(node.attrs?.anchor);
   const suffix = anchor ? ` {#${anchor}}` : '';
@@ -319,7 +325,7 @@ function writeHeading(node: JSONContent, plugins: readonly MarkdownPlugin[]): st
     return rest.length === 0 && block?.kind === 'heading' && block.level === expected.level && block.anchor === (expected.anchor ?? undefined)
       ? block.inline
       : null;
-  }, { breaks: 'space', trim: 'both', plugins });
+  }, { breaks: 'space', trim: 'both', plugins, repairs });
   return `${hashes} ${text}${suffix}`;
 }
 
@@ -375,7 +381,7 @@ function isCodeText(node: JSONContent): boolean {
   return (node.marks ?? []).some((mark) => mark.type === 'code');
 }
 
-function writeParagraph(content: readonly JSONContent[], plugins: readonly MarkdownPlugin[], inCallout = false): string[] {
+function writeParagraph(content: readonly JSONContent[], { plugins, inCallout, repairs }: BlockContext): string[] {
   // A hard break at the very end has nothing after it to break to, and a blank line would end the paragraph.
   const trimmed = [...content];
   while (trimmed.length > 0 && trimmed[trimmed.length - 1].type === 'hardBreak') trimmed.pop();
@@ -386,7 +392,7 @@ function writeParagraph(content: readonly JSONContent[], plugins: readonly Markd
     return blocks.length === 1 && blocks[0].kind === 'paragraph' ? blocks[0].inline : null;
     // A paragraph is not indented (CommonMark strips it too): after a list, an indented first line would join the list.
     // Whitespace and breaks after its last word show nothing.
-  }, { lineStarts: true, inCallout, trim: 'both', plugins });
+  }, { lineStarts: true, inCallout, trim: 'both', plugins, repairs });
   // Nothing to write (its only content was an atom that cannot be written) is no paragraph, not a blank line.
   return text === '' ? [] : text.split('\n');
 }
@@ -411,18 +417,18 @@ function writeList(node: JSONContent, context: BlockContext): string[] {
       if (others.length > 0 || block?.kind !== 'list' || block.items.length !== 1) return null;
       const read = block.items[0];
       return read.children.length === 0 && read.checked === checked ? read.inline : null;
-    }, { breaks: 'space', trim: 'start', plugins: context.plugins });
+    }, { breaks: 'space', trim: 'start', plugins: context.plugins, repairs: context.repairs });
     // `- | ` is also a table delimiter row: after a line with a pipe in it, the list would read as a table.
     out.push(isDelimiterRow(`${marker}${task}${line}`) ? `${marker}${task}${line.replace(/(?<!\\)\|/g, '\\|')}` : `${marker}${task}${line}`);
     // Children sit directly under the item line, indented to its content; blank lines between them stay in the item.
     const indent = ' '.repeat(marker.length);
     const body = writeBlocks([...(spill.length > 0 ? [{ type: 'paragraph', content: spill }] : []), ...children], context);
-    out.push(...body.map((bodyLine) => (bodyLine === '' ? '' : `${indent}${bodyLine}`)));
+    pushAll(out, body.map((bodyLine) => (bodyLine === '' ? '' : `${indent}${bodyLine}`)));
   });
   return out;
 }
 
-function writeTable(node: JSONContent, plugins: readonly MarkdownPlugin[]): string[] {
+function writeTable(node: JSONContent, { plugins, repairs }: BlockContext): string[] {
   const rows = (node.content ?? []).filter((row) => row.type === 'tableRow');
   if (rows.length === 0) return [];
   const header = rows[0].content ?? [];
@@ -440,7 +446,7 @@ function writeTable(node: JSONContent, plugins: readonly MarkdownPlugin[]): stri
     return writeInlineVerified(inline, (written) => {
       const [block, ...rest] = parseDocBody(`| ${written} |\n| --- |`, { plugins });
       return rest.length === 0 && block?.kind === 'table' && block.rows.length === 0 && block.header.length === 1 ? block.header[0] : null;
-    }, { breaks: 'space', table: true, trim: 'both', plugins });
+    }, { breaks: 'space', table: true, trim: 'both', plugins, repairs });
   };
   const line = (cells: string[]): string => {
     const row = `| ${cells.join(' | ')} |`;
@@ -492,6 +498,8 @@ interface InlineOptions {
   inCallout?: boolean;
   /** The grammar's tokens, for reading back what was written and writing the nodes they open as. */
   plugins?: readonly MarkdownPlugin[];
+  /** What the document being written has left to spend repairing marks. */
+  repairs?: MarkRepairs;
 }
 
 /**
@@ -627,68 +635,111 @@ function writablePieces(nodes: readonly JSONContent[], options: InlineOptions): 
 }
 
 /**
- * How many marks `readableMarks` will try taking off one word, one at a time. One unreadable spot needs only a few, and each
- * try reads the word again, so a long chain of touching spans must not get a try per span: this can run on a server's event loop.
+ * How many marks `readableMarks` will try taking off one stretch of a run, one at a time. One unreadable spot needs only a
+ * few, and each try reads the stretch again, so a long chain of touching spans must not get a try per span.
  */
 const MAX_MARK_ATTEMPTS = 16;
 
 /**
+ * How many characters `readableMarks` may read to repair marks while one document is written, with `READ_OVERHEAD` more for
+ * each read. Repair is the one part of writing that reads the same text again, and this can run on a server's event loop,
+ * so the whole document shares one allowance: a page of unreadable spots costs about a second more at most, in however many
+ * runs, and a page with a handful spends almost none of it. Spots past the allowance are written plain.
+ */
+const MARK_REPAIR_ALLOWANCE = 1_000_000;
+const READ_OVERHEAD = 32;
+
+/** What is left of `MARK_REPAIR_ALLOWANCE` for the document being written. */
+interface MarkRepairs {
+  left: number;
+}
+
+function markRepairs(): MarkRepairs {
+  return { left: MARK_REPAIR_ALLOWANCE };
+}
+
+/**
  * The last resort for marks no spelling can hold, where neighbouring spans' delimiters run together into one marker that no
  * longer flanks (bold italic, then italic, then a word, all touching). Left alone the delimiters would read as literal
- * characters and change the text, so one piece gives up a mark, italic first, and failing that its word is written plain.
+ * characters and change the text, so one piece gives up a mark, italic first, and failing that its stretch is written plain.
  * The rest of the run keeps its marks.
  *
- * Whitespace beside a marker settles how it flanks, so a spot is found by reading each word on its own with what touches it.
- * Every try reads one word, not the whole run: a page of such spots (`https://a.b***y ******` repeated) stays linear. Each
- * style is tried in full, as the run is written in one, and the run is read once more at the end, because spans can still
- * pair across words. If no style holds, it is written plain.
+ * Whitespace beside a marker settles how it flanks, so a spot is first looked for word by word, each read on its own with what
+ * touches it: a page of such spots (`https://a.b***y ******` repeated) stays linear. Words can read apart and still not
+ * together, as a mark shared across a space pairs its delimiters differently (`foo***bar* baz*qux***`), so if the run does
+ * not read whole the same search widens to each phrase, where marks carry across spaces, and then to the run. Each style is
+ * tried in full, as the run is written in one. If no style holds, it is written plain.
  */
 function readableMarks(pieces: Piece[], options: InlineOptions): Piece[] {
   const marked = (piece: Piece, mark: 'bold' | 'italic'): boolean => isFormatted(piece) && piece[mark];
   const anyMark = (piece: Piece | undefined): boolean => piece !== undefined && (marked(piece, 'bold') || marked(piece, 'italic'));
   // Only spans of different marks can touch, and only a bare link can lean on being written bare; everything else was
   // fitted above. This is on the path of every run, so most stop here.
-  const atRisk = (piece: Piece, index: number): boolean =>
-    anyMark(piece) && (anyMark(pieces[index - 1]) || anyMark(pieces[index + 1]) || (piece.kind === 'link' && writesBare(piece)));
-  if (!pieces.some(atRisk)) return pieces;
+  const atRisk = (run: readonly Piece[], index: number): boolean => {
+    const piece = run[index];
+    return anyMark(piece) && (anyMark(run[index - 1]) || anyMark(run[index + 1]) || (piece.kind === 'link' && writesBare(piece)));
+  };
+  if (!pieces.some((_, index) => atRisk(pieces, index))) return pieces;
   // Read as a run, so a table's pipe escapes (the row reads those, before the cell) stay out of it.
   const asRun = { ...options, table: false };
-  const readsIn = (style: InlineStyle, candidate: readonly Piece[]): boolean =>
-    sameLeaves(leaves(parseDocInline(renderSpans(candidate, style, asRun, 'bold'), { plugins: options.plugins ?? [] })), leaves(piecesToInline(candidate)));
-  const reads = (candidate: readonly Piece[]): boolean => STYLES.some((style) => readsIn(style, candidate));
+  const render = (style: InlineStyle, candidate: readonly Piece[]): string => renderSpans(candidate, style, asRun, 'bold');
+  const says = (written: string, candidate: readonly Piece[]): boolean =>
+    sameLeaves(leaves(parseDocInline(written, { plugins: options.plugins ?? [] })), leaves(piecesToInline(candidate)));
+  // Without a link or a character to escape every style writes the same bytes, and reading them again would learn nothing.
+  const styles = pieces.some((piece) => piece.kind === 'link' || (piece.kind === 'text' && piece.text.search(FULL_ESCAPE) >= 0)) ? STYLES : STYLES.slice(0, 1);
+  const reads = (candidate: readonly Piece[]): boolean => styles.some((style) => says(render(style, candidate), candidate));
   if (reads(pieces)) return pieces;
+  const repairs = options.repairs ?? markRepairs();
   const settled = (candidate: readonly Piece[]): Piece[] => settleMarks(shareWhitespaceMarks(candidate));
+  /** A read that repair pays for. */
+  const paidRead = (style: InlineStyle, candidate: readonly Piece[]): boolean => {
+    const written = render(style, candidate);
+    repairs.left -= written.length + READ_OVERHEAD;
+    return says(written, candidate);
+  };
   const withoutMarks = (piece: Piece): Piece => (isFormatted(piece) ? { ...piece, bold: false, italic: false } : piece);
-  const sameWord = (left: Piece, right: Piece): boolean => anyMark(left) && anyMark(right) && !isSpaceChar(edgeChars(left).last) && !isSpaceChar(edgeChars(right).first);
-  /** The run with each word that does not read in this style given up a mark, or failing that all of them. */
-  const repaired = (style: InlineStyle): Piece[] => {
-    const out = [...pieces];
-    for (let start = 0, end = 1; start < pieces.length; start = end, end = start + 1) {
-      while (end < pieces.length && sameWord(pieces[end - 1], pieces[end])) end += 1;
-      const word = Array.from({ length: end - start }, (_, offset) => start + offset);
-      if (!word.some((index) => atRisk(pieces[index], index))) continue;
+  const isSpace = (piece: Piece): boolean => piece.kind === 'text' && piece.text.trim() === '';
+  /** The run with each stretch at risk that does not read in this style given up a mark, or failing that all of them. */
+  const givenUp = (run: readonly Piece[], style: InlineStyle, joined: (left: Piece, right: Piece) => boolean): Piece[] => {
+    const out = [...run];
+    for (let start = 0, end = 1; start < run.length; start = end, end = start + 1) {
+      while (end < run.length && joined(run[end - 1], run[end])) end += 1;
+      const stretch = Array.from({ length: end - start }, (_, offset) => start + offset).filter((index) => atRisk(run, index));
+      if (stretch.length === 0) continue;
       const from = Math.max(0, start - 1);
-      const beside = pieces.slice(from, end + 1);
-      if (readsIn(style, settled(beside))) continue;
-      const attempts = (['italic', 'bold'] as const).flatMap((mark) => word.filter((index) => marked(pieces[index], mark)).map((index) => ({ mark, index })));
+      const beside = run.slice(from, end + 1);
+      const holds = (candidate: readonly Piece[]): boolean => repairs.left > 0 && paidRead(style, settled(candidate));
+      if (holds(beside)) continue;
+      const attempts = (['italic', 'bold'] as const).flatMap((mark) => stretch.filter((index) => marked(run[index], mark) && !isSpace(run[index])).map((index) => ({ mark, index })));
       const fix = attempts
         .slice(0, MAX_MARK_ATTEMPTS)
-        .find(({ mark, index }) => readsIn(style, settled(beside.map((piece, offset) => (from + offset === index ? { ...piece, [mark]: false } : piece)))));
-      for (const index of word) {
-        if (!fix) out[index] = withoutMarks(pieces[index]);
-        else if (index === fix.index) out[index] = { ...pieces[index], [fix.mark]: false };
-      }
+        .find(({ mark, index }) => holds(beside.map((piece, offset) => (from + offset === index ? { ...piece, [mark]: false } : piece))));
+      if (fix) out[fix.index] = { ...run[fix.index], [fix.mark]: false };
+      else for (let index = start; index < end; index += 1) out[index] = withoutMarks(run[index]);
     }
-    return settled(out);
+    return out;
+  };
+  const sameWord = (left: Piece, right: Piece): boolean => anyMark(left) && anyMark(right) && !isSpaceChar(edgeChars(left).last) && !isSpaceChar(edgeChars(right).first);
+  const samePhrase = (left: Piece, right: Piece): boolean => anyMark(left) && anyMark(right);
+  const repaired = (style: InlineStyle): Piece[] | null => {
+    let current: Piece[] = pieces;
+    for (const joined of [sameWord, samePhrase, () => true]) {
+      current = settled(givenUp(current, style, joined));
+      if (paidRead(style, current)) return current;
+      if (repairs.left <= 0) return null;
+    }
+    return null;
   };
   // A word that needs a mark off in one style may read whole in another, so the style that kept the most wins.
   const kept = (candidate: readonly Piece[]): number =>
     candidate.reduce((sum, piece) => sum + (isFormatted(piece) ? (Number(piece.bold) + Number(piece.italic)) * piece.text.length : 0), 0);
-  const candidates = STYLES.flatMap((style) => {
+  let best: Piece[] | null = null;
+  for (const style of styles) {
+    if (repairs.left <= 0) break;
     const candidate = repaired(style);
-    return readsIn(style, candidate) ? [candidate] : [];
-  });
-  if (candidates.length > 0) return candidates.reduce((best, candidate) => (kept(candidate) > kept(best) ? candidate : best));
+    if (candidate && (!best || kept(candidate) > kept(best))) best = candidate;
+  }
+  if (best) return best;
   const plain = joinPieces(pieces.map(withoutMarks));
   return reads(plain) ? plain : pieces;
 }
@@ -1181,7 +1232,7 @@ function codeSpan(text: string, options: InlineOptions): string {
 }
 
 function oneCodeSpan(text: string, options: InlineOptions): string {
-  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const longest = (text.match(/`+/g) ?? []).reduce((most, run) => Math.max(most, run.length), 0);
   const fence = '`'.repeat(longest + 1);
   const pad = text.startsWith('`') || text.endsWith('`') || (text.startsWith(' ') && text.endsWith(' ') && text.trim() !== '');
   const body = pad ? ` ${text} ` : text;
@@ -1282,10 +1333,10 @@ function collectLeaves(nodes: readonly DocInline[], marks: readonly string[]): I
   for (const node of nodes) {
     switch (node.kind) {
       case 'strong':
-        out.push(...collectLeaves(node.children, [...marks, 'bold']));
+        pushAll(out, collectLeaves(node.children, [...marks, 'bold']));
         break;
       case 'emphasis':
-        out.push(...collectLeaves(node.children, [...marks, 'italic']));
+        pushAll(out, collectLeaves(node.children, [...marks, 'italic']));
         break;
       case 'text':
         // Bold or italic whitespace looks like plain whitespace, so whitespace never counts as marked.

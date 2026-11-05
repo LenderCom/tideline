@@ -275,11 +275,49 @@ describe('codec: marks no spelling can hold', () => {
   });
 
   it('stays fast on a page of paragraphs that each hold two such spots', () => {
-    const page = doc(...Array.from({ length: 1000 }, () => para(...unreadable, text(' '), ...unreadable)));
+    const page = doc(...Array.from({ length: 2000 }, () => para(...unreadable, text(' '), ...unreadable)));
     const started = performance.now();
     const body = docToMarkdown(page);
     expect(performance.now() - started).toBeLessThan(2000);
-    expect(body.split('\n\n')).toEqual(Array.from({ length: 1000 }, () => '**a***b*c **a***b*c'));
+    expect(body.split('\n\n')).toEqual(Array.from({ length: 2000 }, () => '**a***b*c **a***b*c'));
+  });
+
+  it('keeps the marks of words that read apart but not together, at the cost of one', () => {
+    const spot = 'foo**bar baz*qux***';
+    const body = docToMarkdown(markdownToDoc('See **important** and foo***bar*** **baz*qux*** then _z_.'));
+    expect(body).toBe(`See **important** and ${spot} then _z_.`);
+    stable(body);
+    // Two of them in one run: each phrase is repaired on its own.
+    const twice = docToMarkdown(markdownToDoc('foo***bar*** **baz*qux*** and **x**_y_ and foo***bar*** **baz*qux***'));
+    expect(twice).toBe(`${spot} and **x**_y_ and ${spot}`);
+    stable(twice);
+  });
+
+  it('shares one repair allowance across a document: later spots go plain, and a run that reads whole keeps its marks', () => {
+    const count = 40_000;
+    const started = performance.now();
+    const body = docToMarkdown(doc(...Array.from({ length: count }, () => para(...unreadable)), para(text('x', 'bold'), text('y', 'italic'))));
+    expect(performance.now() - started).toBeLessThan(5000);
+    const paragraphs = body.split('\n\n');
+    expect(paragraphs).toHaveLength(count + 1);
+    expect(paragraphs[0]).toBe('**a***b*c');
+    expect(paragraphs[count - 1]).toBe('abc');
+    expect(paragraphs[count]).toBe('**x**_y_');
+    expect(new Set(paragraphs.slice(0, count))).toEqual(new Set(['**a***b*c', 'abc']));
+    stable(body);
+  });
+
+  it.each([
+    ['spots in one run', '***a****b*c '],
+    ['one unbroken chain', '***a****b*c'],
+    ['a marked bare URL beside a word', 'https://a.b***y ******'],
+    ['phrases whose words read apart', 'foo***bar*** **baz*qux*** '],
+    ['paragraphs of one spot', '***a****b*c\n\n'],
+  ])('writes a 1 MB page of %s within seconds', (_shape, unit) => {
+    const page = markdownToDoc(unit.repeat(Math.ceil(1_000_000 / unit.length)));
+    const started = performance.now();
+    docToMarkdown(page);
+    expect(performance.now() - started).toBeLessThan(15_000);
   });
 
   it('stays fast on one long run of marked words', () => {
@@ -288,6 +326,29 @@ describe('codec: marks no spelling can hold', () => {
     const body = docToMarkdown(page);
     expect(performance.now() - started).toBeLessThan(2000);
     expect(body.startsWith('_a_ **b** _a_')).toBe(true);
+  });
+});
+
+describe('codec: pages too long to pass as arguments', () => {
+  const longCode = 'a\n'.repeat(300_000);
+  const code: JSONContent = { type: 'codeBlock', content: [text(longCode)] };
+
+  it('reads and writes one span holding hundreds of thousands of pieces', () => {
+    const source = `**${'*a* '.repeat(200_000)}b**`;
+    const page = markdownToDoc(source);
+    expect(docToMarkdown(page).length).toBeGreaterThan(source.length / 2);
+  });
+
+  it.each([
+    ['at the top of a page', doc(code)],
+    ['in a quote', doc({ type: 'blockquote', content: [code] })],
+    ['in a list item', doc({ type: 'bulletList', content: [{ type: 'listItem', content: [para(text('x')), code] }] })],
+  ])('writes a code block of hundreds of thousands of lines %s', (_where, page) => {
+    expect(docToMarkdown(page).split('\n').length).toBeGreaterThan(300_000);
+  });
+
+  it('fences a code span holding hundreds of thousands of backtick runs', () => {
+    expect(docToMarkdown(doc(para({ ...text('a`'.repeat(300_000)), marks: [{ type: 'code' }] }))).startsWith('``')).toBe(true);
   });
 });
 
