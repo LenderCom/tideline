@@ -75,11 +75,11 @@ export const MAX_BLOCK_DEPTH = 32;
  * that already starts with zero-width spaces before such a line gets one more. Reading drops one, so the code holds
  * exactly what was typed. U+200B is not whitespace to `\s`, which is why the guarded line does not close the fence.
  */
-export const FENCE_GUARD = '​';
+export const FENCE_GUARD = '\u200B';
 
 /** Whether `line`, behind any zero-width spaces, would end the fenced block or the callout around it. */
 export function endsFencedCode(line: string): boolean {
-  const bare = line.replace(/^​+/, '');
+  const bare = line.replace(/^\u200B+/, '');
   return FENCE_LINE.test(bare) || CALLOUT_CLOSE.test(bare);
 }
 
