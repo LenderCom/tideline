@@ -1,6 +1,6 @@
 import type { JSONContent } from '@tiptap/core';
 import { canCloseEmphasis, canOpenEmphasis, charAt, charBefore, isDelimiterRow, isPunctuationChar, isSpaceChar, type TableAlign } from './inline.js';
-import { FRONT_MATTER_KEY, FRONT_MATTER_LANG, parseDocBody, parseDocInline, type DocBlock, type DocCalloutKind, type DocInline, type DocListItem } from './parse.js';
+import { endsFencedCode, FENCE_GUARD, FRONT_MATTER_KEY, FRONT_MATTER_LANG, parseDocBody, parseDocInline, type DocBlock, type DocCalloutKind, type DocInline, type DocListItem } from './parse.js';
 import { tokenMatcher, type GrammarOptions, type MarkdownPlugin } from './plugin.js';
 
 /**
@@ -339,12 +339,15 @@ const CALLOUT_CLOSE = /^ {0,3}:::\s*$/;
 
 /**
  * A fenced block. the format has no longer fences, so a content line that looks like a fence would close the block early; it
- * gets a zero-width space in front, which keeps the code readable and the page whole. Inside a callout a `:::` line is
- * the same hazard (the callout is closed by lines, before fences are read) and gets the same treatment.
+ * gets a zero-width space in front (`FENCE_GUARD`), which keeps the page whole. Inside a callout a `:::` line is the same
+ * hazard (the callout is closed by lines, before fences are read) and gets the same treatment. The parser drops one
+ * guard from such a line, so a line that already starts with zero-width spaces before a fence or `:::` gets one more,
+ * wherever it is: the code reads back exactly as it was typed.
  */
 function writeFence(lang: string, text: string, context: BlockContext): string[] {
-  const closes = (line: string): boolean => FENCE_LINE.test(line) || (context.inCallout && CALLOUT_CLOSE.test(line));
-  const lines = text === '' ? [] : text.split('\n').map((line) => (closes(line) ? `\u200B${line}` : line));
+  const guarded = (line: string): boolean =>
+    FENCE_LINE.test(line) || (context.inCallout && CALLOUT_CLOSE.test(line)) || (line.startsWith(FENCE_GUARD) && endsFencedCode(line));
+  const lines = text === '' ? [] : text.split('\n').map((line) => (guarded(line) ? `${FENCE_GUARD}${line}` : line));
   return [`\`\`\`${oneLine(lang)}`, ...lines, '```'];
 }
 

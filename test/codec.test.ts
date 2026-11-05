@@ -174,11 +174,27 @@ describe('codec: documented normalisations', () => {
     expect(shapeOf('**Ask** <@u1> **now**')).toEqual(shapeOf('**Ask <@u1> now**'));
   });
 
-  it('keeps a code line that looks like a fence inside the block, behind a zero-width space', () => {
+  it('keeps a code line that looks like a fence inside the block, behind a zero-width space a reader drops', () => {
     const doc: JSONContent = { type: 'doc', content: [{ type: 'codeBlock', attrs: { language: 'md' }, content: [{ type: 'text', text: 'a\n```\nb' }] }] };
     const written = docToMarkdown(doc);
     expect(written).toBe('```md\na\n\u200B```\nb\n```');
-    expect(parseDocBody(written)).toEqual([{ kind: 'code', lang: 'md', text: 'a\n\u200B```\nb' }]);
+    expect(parseDocBody(written)).toEqual([{ kind: 'code', lang: 'md', text: 'a\n```\nb' }]);
+  });
+
+  it('writes indented code with a fence-like line as a fence that reads back as the same code', () => {
+    const body = '> \t```` \n- *';
+    expect(roundTrip(body)).toBe('> ```\n> \u200B```` \n> ```\n\n- *');
+    expect(shapeOf(roundTrip(body))).toEqual(shapeOf(body));
+    expect(parseDocBody(roundTrip(body))[0]).toEqual({ kind: 'quote', blocks: [{ kind: 'code', text: '```` ' }] });
+  });
+
+  it('keeps a zero-width space typed in front of a fence-like line: the writer guards it once more', () => {
+    const text = '\u200B```\n\u200B\u200B  ```js\n\u200B:::\n\u200Bplain';
+    const doc: JSONContent = { type: 'doc', content: [{ type: 'codeBlock', attrs: { language: null }, content: [{ type: 'text', text }] }] };
+    const written = docToMarkdown(doc);
+    expect(written).toBe('```\n\u200B\u200B```\n\u200B\u200B\u200B  ```js\n\u200B\u200B:::\n\u200Bplain\n```');
+    expect(parseDocBody(written)).toEqual([{ kind: 'code', text }]);
+    expect(docToMarkdown(markdownToDoc(written))).toBe(written);
   });
 
   it('guards a `:::` line in a code block inside a callout the same way', () => {
@@ -187,6 +203,7 @@ describe('codec: documented normalisations', () => {
       content: [{ type: 'callout', attrs: { kind: 'tip', title: null }, content: [{ type: 'codeBlock', attrs: { language: null }, content: [{ type: 'text', text: ':::' }] }] }],
     };
     expect(docToMarkdown(doc)).toBe(':::tip\n```\n\u200B:::\n```\n:::');
+    expect(markdownToDoc(docToMarkdown(doc))).toEqual(doc);
     expect(docToMarkdown({ type: 'doc', content: doc.content?.[0].content })).toBe('```\n:::\n```');
   });
 
@@ -351,11 +368,10 @@ function editorShape(doc: JSONContent): Shape {
         return { p: inlineLeaves(node.content) };
       case 'heading':
         return { h: node.attrs?.level, anchor: node.attrs?.anchor ?? null, inline: inlineLeaves(node.content) };
-      // A line that would close its block early is written behind a zero-width space (a documented normalisation).
       case 'codeBlock':
-        return { code: unguarded(node.content?.[0]?.text ?? ''), lang: node.attrs?.language ?? null };
+        return { code: node.content?.[0]?.text ?? '', lang: node.attrs?.language ?? null };
       case 'mermaid':
-        return { mermaid: unguarded(node.content?.[0]?.text ?? '') };
+        return { mermaid: node.content?.[0]?.text ?? '' };
       case 'listItem':
         return { checked: node.attrs?.checked ?? null, content: (node.content ?? []).map(walk) };
       case 'tableHeader':
@@ -370,8 +386,4 @@ function editorShape(doc: JSONContent): Shape {
     }
   };
   return walk(doc);
-}
-
-function unguarded(code: string): string {
-  return code.replace(/^\u200B/gm, '');
 }

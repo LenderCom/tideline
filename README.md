@@ -74,6 +74,7 @@ tideline reads and writes one markdown dialect, and it comes with an editor sche
 | Front matter | `---` lines around a block at the very start of a body, whose first line is `key:`. It opens as a code block with the language `front-matter`, verbatim |
 | Literal markers, which CommonMark's flanking rules read as text | `a * b * c`, `*.ts and *.md`, `snake_case_name`, `2*(3+4)*5` |
 | Escapes, where text would otherwise read as markup | `\*not emphasis\*`, `https\://not.a.link` |
+| A code-block line that would close its block: a fence, or `:::` inside a callout | The line behind a zero-width space (U+200B). A reader drops it, so the code reads back exactly as typed. A line that already starts with zero-width spaces before such a line gets one more |
 
 ### What is normalised
 
@@ -101,7 +102,6 @@ The schema doesn't offer these, but pasted JSON can carry them. The writer never
 - A callout nested inside a callout, with more after it, is written as its content.
 - Bold or italic that no delimiter can write where it sits gives up as little as it can. A word then `(b)` in italic then a word comes out as `a(_b_)c`, and bold `Note:` directly before a word as `**Note**:text`. A code span or bracketed link there loses the mark. Where touching spans' delimiters run together into a marker no span can read, one span there gives up a mark, or failing that every span in that word or phrase does. The rest of the run keeps its marks. Writing a document spends a fixed allowance on this repair, so on a page packed with such spots, those past the allowance are written plain.
 - Bold or italic on an inline atom isn't kept: Yjs keeps marks on text only, so co-editing would lose it anyway.
-- A code-block line that would close its fence gets a zero-width space in front of it.
 
 Two shapes can't be written at all and come out as close as they can: an inline code span holding two backticks in a row at the very start of a paragraph line, and a code span that runs across lines and holds a backtick, where one of its lines would read as a block.
 

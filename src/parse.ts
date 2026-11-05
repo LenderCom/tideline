@@ -70,6 +70,24 @@ const CODE_INDENT = 4;
  */
 export const MAX_BLOCK_DEPTH = 32;
 
+/**
+ * A fenced-code line that would end its block early, a fence or a `:::` line, is written behind a zero-width space; one
+ * that already starts with zero-width spaces before such a line gets one more. Reading drops one, so the code holds
+ * exactly what was typed. U+200B is not whitespace to `\s`, which is why the guarded line does not close the fence.
+ */
+export const FENCE_GUARD = '​';
+
+/** Whether `line`, behind any zero-width spaces, would end the fenced block or the callout around it. */
+export function endsFencedCode(line: string): boolean {
+  const bare = line.replace(/^​+/, '');
+  return FENCE_LINE.test(bare) || CALLOUT_CLOSE.test(bare);
+}
+
+/** A fenced-code line as it was typed: one guarding zero-width space dropped. */
+function unguard(line: string): string {
+  return line.startsWith(FENCE_GUARD) && endsFencedCode(line) ? line.slice(FENCE_GUARD.length) : line;
+}
+
 /** The language of the code block that holds a body's front matter. The codec writes it back between `---` lines. */
 export const FRONT_MATTER_LANG = 'front-matter';
 /** The first line front matter must have: without it, `---` at the top of a body is an ordinary divider. */
@@ -320,7 +338,7 @@ function parseBlocks(lines: string[], ids: Map<string, number>, options: Grammar
       index += 1;
       // An unterminated fence runs to the end of the body: the rest of it is plainly code.
       while (index < lines.length && !FENCE_LINE.test(lines[index])) {
-        body.push(lines[index]);
+        body.push(unguard(lines[index]));
         index += 1;
       }
       blocks.push({ kind: 'code', ...(lang ? { lang } : {}), text: body.join('\n') });
