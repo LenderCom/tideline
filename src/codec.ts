@@ -367,7 +367,8 @@ function splitAtBlankLines(content: readonly JSONContent[], plugins: readonly Ma
     } else current.push(line);
   }
   if (current.length > 0) parts.push(current.flatMap((run, index) => [...(index > 0 ? [{ type: 'hardBreak' }] : []), ...run]));
-  return parts.filter((part) => writeParagraph(part, plugins).length > 0);
+  // Whether it writes anything, not what: writing it here too would run every paragraph through `readableMarks` three times.
+  return parts.filter((part) => trimPieces(writablePieces(part, { plugins }), 'both').length > 0);
 }
 
 function isCodeText(node: JSONContent): boolean {
@@ -548,6 +549,11 @@ const ANCHOR_HREF = /^#([A-Za-z0-9][A-Za-z0-9._-]*)$/;
 const ATTACHMENT_SRC = /^attachment:[A-Za-z0-9_-]+$/;
 
 function toPieces(nodes: readonly JSONContent[], options: InlineOptions): Piece[] {
+  return readableMarks(canonicalPieces(options.plugins ?? [], writablePieces(nodes, options)), options);
+}
+
+/** The pieces a run of nodes writes, with its marks as they came. */
+function writablePieces(nodes: readonly JSONContent[], options: InlineOptions): Piece[] {
   const pieces: Piece[] = [];
   const has = (node: JSONContent, type: string): boolean => (node.marks ?? []).some((mark) => mark.type === type);
   for (const node of nodes) {
@@ -610,15 +616,23 @@ function toPieces(nodes: readonly JSONContent[], options: InlineOptions): Piece[
     }
   }
   // Links and anchor links whose text ended up empty or unwritable degrade to text, so nothing is dropped.
-  return readableMarks(canonicalPieces(options.plugins ?? [], pieces.map((piece): Piece => {
+  return pieces.map((piece): Piece => {
     if (piece.kind === 'anchorLink') {
       // Anchor-link text is read raw (no escapes): brackets, backticks and newlines cannot be written in it.
       const text = piece.text.replace(/[[\]`\n]/g, '');
       return text.trim() ? { ...piece, text } : { kind: 'text', text: piece.text, bold: false, italic: false };
     }
     return piece;
-  })), options);
+  });
 }
+
+/**
+ * How many marks `readableMarks` will try taking off, one at a time. One unreadable spot offers a few, and taking off one
+ * mark cannot repair two spots. A run with more is written plain straight away, because each try reads the whole run again
+ * in every style: a page of such spots (`https://a.b***y ******` repeated) would cost the square of its length, and this
+ * runs on saw-collab's event loop.
+ */
+const MAX_MARK_ATTEMPTS = 5;
 
 /**
  * The last resort for marks no spelling can hold, where neighbouring spans' delimiters run together into one marker that no
@@ -627,10 +641,12 @@ function toPieces(nodes: readonly JSONContent[], options: InlineOptions): Piece[
  */
 function readableMarks(pieces: Piece[], options: InlineOptions): Piece[] {
   const marked = (piece: Piece, mark: 'bold' | 'italic'): boolean => isFormatted(piece) && piece[mark];
-  const anyMark = (piece: Piece): boolean => marked(piece, 'bold') || marked(piece, 'italic');
+  const anyMark = (piece: Piece | undefined): boolean => piece !== undefined && (marked(piece, 'bold') || marked(piece, 'italic'));
   // Only spans of different marks can touch, and only a bare link can lean on being written bare; everything else was
   // fitted above. This is on the path of every run, so most stop here.
-  if (!pieces.some((piece, index) => (index > 0 && anyMark(piece) && anyMark(pieces[index - 1])) || (piece.kind === 'link' && anyMark(piece) && writesBare(piece)))) return pieces;
+  const atRisk = (piece: Piece, index: number): boolean =>
+    anyMark(piece) && (anyMark(pieces[index - 1]) || anyMark(pieces[index + 1]) || (piece.kind === 'link' && writesBare(piece)));
+  if (!pieces.some(atRisk)) return pieces;
   // Read as a run, so a table's pipe escapes (the row reads those, before the cell) stay out of it.
   const asRun = { ...options, table: false };
   const reads = (candidate: readonly Piece[]): boolean =>
@@ -638,9 +654,9 @@ function readableMarks(pieces: Piece[], options: InlineOptions): Piece[] {
       sameLeaves(leaves(parseDocInline(renderSpans(candidate, style, asRun, 'bold'), { plugins: options.plugins ?? [] })), leaves(piecesToInline(candidate))),
     );
   if (reads(pieces)) return pieces;
-  for (const mark of ['italic', 'bold'] as const) {
-    for (const [index, piece] of pieces.entries()) {
-      if (!marked(piece, mark)) continue;
+  const attempts = (['italic', 'bold'] as const).flatMap((mark) => pieces.flatMap((piece, index) => (marked(piece, mark) && atRisk(piece, index) ? [{ mark, index }] : [])));
+  if (attempts.length <= MAX_MARK_ATTEMPTS) {
+    for (const { mark, index } of attempts) {
       const candidate = settleMarks(shareWhitespaceMarks(pieces.map((other, at) => (at === index ? { ...other, [mark]: false } : other))));
       if (reads(candidate)) return candidate;
     }
@@ -905,9 +921,15 @@ function insideSpan(edges: SpanEdges): SpanEdges {
 function renderSpans(pieces: readonly Piece[], style: InlineStyle, options: InlineOptions, mark: 'bold' | 'italic' | null, edges: SpanEdges = NO_EDGES): string {
   if (mark === null) return pieces.map((piece, index) => renderPiece(piece, style, options, pieces[index + 1])).join('');
   let out = '';
+  // Kept apart from `out`, because reading a character of a string being built flattens it: a long run would cost its square.
+  let before = edges.before;
+  const write = (written: string): void => {
+    out += written;
+    if (written !== '') before = charBefore(written, written.length);
+  };
   let index = 0;
   const around = (end: number): SpanEdges => ({
-    before: out === '' ? edges.before : charBefore(out, out.length),
+    before,
     after: end < pieces.length ? (nextLeadChar(pieces[end]) ?? '') : edges.after,
   });
   while (index < pieces.length) {
@@ -916,14 +938,14 @@ function renderSpans(pieces: readonly Piece[], style: InlineStyle, options: Inli
       // A run without this mark, rendered for the next mark in.
       let end = index;
       while (end < pieces.length && !(isFormatted(pieces[end]) && (pieces[end] as Formatted)[mark])) end += 1;
-      out += renderSpans(pieces.slice(index, end), style, options, mark === 'bold' ? 'italic' : null, around(end));
+      write(renderSpans(pieces.slice(index, end), style, options, mark === 'bold' ? 'italic' : null, around(end)));
       index = end;
       continue;
     }
     let end = index;
     while (end < pieces.length && isFormatted(pieces[end]) && (pieces[end] as Formatted)[mark] && pieces[end].kind !== 'break') end += 1;
     const inner = pieces.slice(index, end).map((p) => ({ ...(p as Formatted), [mark]: false }));
-    out += wrapRun(inner, mark, style, options, around(end));
+    write(wrapRun(inner, mark, style, options, around(end)));
     index = end;
   }
   return out;
@@ -941,15 +963,14 @@ function wrapRun(inner: readonly Formatted[], mark: 'bold' | 'italic', style: In
   if (wrapped !== whole || whole.trim() === '') return wrapped;
   const attempt = (parts: readonly Formatted[][]): string | null => {
     let out = '';
+    let before = edges.before;
     for (const [index, part] of parts.entries()) {
-      const around: SpanEdges = {
-        before: out === '' ? edges.before : charBefore(out, out.length),
-        after: index === parts.length - 1 ? edges.after : '*',
-      };
+      const around: SpanEdges = { before, after: index === parts.length - 1 ? edges.after : '*' };
       const content = render(part, around);
       const span = delimit(content, mark, options.plugins ?? [], around);
       if (span === content && content.trim() !== '') return null;
       out += span;
+      if (span !== '') before = charBefore(span, span.length);
     }
     return out;
   };

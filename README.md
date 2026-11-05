@@ -98,7 +98,7 @@ The schema doesn't offer these, but pasted JSON can carry them. The writer never
 - A hard break at the end of a paragraph, and empty paragraphs, are dropped.
 - A second paragraph in a table cell joins the first with a space. Merged cells and block content in cells aren't written.
 - A callout nested inside a callout, with more after it, is written as its content.
-- Bold or italic that no delimiter can write where it sits gives up as little as it can. A word then `(b)` in italic then a word comes out as `a(_b_)c`, and bold `Note:` directly before a word as `**Note**:text`. A code span or bracketed link there loses the mark.
+- Bold or italic that no delimiter can write where it sits gives up as little as it can. A word then `(b)` in italic then a word comes out as `a(_b_)c`, and bold `Note:` directly before a word as `**Note**:text`. A code span or bracketed link there loses the mark. Where touching spans' delimiters run together into a marker no span can read, one span gives up a mark, and a run with several such spots is written without any.
 - Bold or italic on an inline atom isn't kept: Yjs keeps marks on text only, so co-editing would lose it anyway.
 - A code-block line that would close its fence gets a zero-width space in front of it.
 

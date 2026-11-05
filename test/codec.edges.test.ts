@@ -221,6 +221,51 @@ describe('codec: a bare URL in emphasis', () => {
   });
 });
 
+describe('codec: marks no spelling can hold', () => {
+  const written = (...content: JSONContent[]): string => docToMarkdown(doc(para(...content)));
+  const unreadable = [text('a', 'bold', 'italic'), text('b', 'italic'), text('c')];
+
+  it('takes one mark off one unreadable spot and leaves the rest of the run marked', () => {
+    const body = written(...unreadable, text(' and '), text('p', 'italic'), text(' then '), text('q', 'bold'));
+    expect(body).toContain(' and _p_ then **q**');
+    expect(leaves(paragraphInline(body)).map((leaf) => leaf.text).join('')).toBe('abc and p then q');
+    stable(body);
+  });
+
+  it('writes a run with two such spots plain, keeping every character', () => {
+    const body = written(...unreadable, text(' '), ...unreadable);
+    expect(body).toBe('abc abc');
+    stable(body);
+  });
+
+  it.each([
+    ['a marked bare URL beside a word', 'https://a.b***y ******'.repeat(200)],
+    ['spans whose delimiters run together', '***a****b*c '.repeat(200)],
+  ])('stays fast on a page of %s', (_shape, source) => {
+    const page = markdownToDoc(source);
+    const started = performance.now();
+    const body = docToMarkdown(page);
+    expect(performance.now() - started).toBeLessThan(2000);
+    stable(body);
+  });
+
+  it('stays fast on a page of paragraphs that each hold two such spots', () => {
+    const page = doc(...Array.from({ length: 2000 }, () => para(...unreadable, text(' '), ...unreadable)));
+    const started = performance.now();
+    const body = docToMarkdown(page);
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(body.split('\n\n')).toEqual(Array.from({ length: 2000 }, () => 'abc abc'));
+  });
+
+  it('stays fast on one long run of marked words', () => {
+    const page = markdownToDoc('*a* **b** '.repeat(30_000));
+    const started = performance.now();
+    const body = docToMarkdown(page);
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(body.startsWith('_a_ **b** _a_')).toBe(true);
+  });
+});
+
 describe('codec: emphasis past the depth cap', () => {
   it('reads a long run of markers without throwing, and is stable after one pass', () => {
     const body = docToMarkdown(markdownToDoc(`${'*'.repeat(20_000)}a${'*'.repeat(20_000)}`));
