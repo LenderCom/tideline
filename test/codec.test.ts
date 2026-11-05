@@ -188,6 +188,14 @@ describe('codec: documented normalisations', () => {
     expect(parseDocBody(roundTrip(body))[0]).toEqual({ kind: 'quote', blocks: [{ kind: 'code', text: '```` ' }] });
   });
 
+  it('guards only a line the reader reads as a fence: a line separator after the backticks is not one', () => {
+    const text = '```\u2028x\n```\u2029';
+    const doc: JSONContent = { type: 'doc', content: [{ type: 'codeBlock', attrs: { language: null }, content: [{ type: 'text', text }] }] };
+    const written = docToMarkdown(doc);
+    expect(written).toBe(`\`\`\`\n${text}\n\`\`\``);
+    expect(parseDocBody(written)).toEqual([{ kind: 'code', text }]);
+  });
+
   it('keeps a zero-width space typed in front of a fence-like line: the writer guards it once more', () => {
     const text = '\u200B```\n\u200B\u200B  ```js\n\u200B:::\n\u200Bplain';
     const doc: JSONContent = { type: 'doc', content: [{ type: 'codeBlock', attrs: { language: null }, content: [{ type: 'text', text }] }] };

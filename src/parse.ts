@@ -77,6 +77,11 @@ export const MAX_BLOCK_DEPTH = 32;
  */
 export const FENCE_GUARD = '\u200B';
 
+/** Whether `line` reads as a fence, and so would close a fenced block it sits in. The writer guards by this same test. */
+export function isFenceLine(line: string): boolean {
+  return FENCE_LINE.test(line);
+}
+
 /** Whether `line`, behind any zero-width spaces, would end the fenced block or the callout around it. */
 export function endsFencedCode(line: string): boolean {
   const bare = line.replace(/^\u200B+/, '');

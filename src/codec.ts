@@ -1,6 +1,6 @@
 import type { JSONContent } from '@tiptap/core';
 import { canCloseEmphasis, canOpenEmphasis, charAt, charBefore, isDelimiterRow, isPunctuationChar, isSpaceChar, type TableAlign } from './inline.js';
-import { endsFencedCode, FENCE_GUARD, FRONT_MATTER_KEY, FRONT_MATTER_LANG, parseDocBody, parseDocInline, type DocBlock, type DocCalloutKind, type DocInline, type DocListItem } from './parse.js';
+import { endsFencedCode, FENCE_GUARD, FRONT_MATTER_KEY, isFenceLine, FRONT_MATTER_LANG, parseDocBody, parseDocInline, type DocBlock, type DocCalloutKind, type DocInline, type DocListItem } from './parse.js';
 import { tokenMatcher, type GrammarOptions, type MarkdownPlugin } from './plugin.js';
 
 /**
@@ -334,7 +334,6 @@ function validAnchor(value: unknown): string | null {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) ? value : null;
 }
 
-const FENCE_LINE = /^\s*```/;
 const CALLOUT_CLOSE = /^ {0,3}:::\s*$/;
 
 /**
@@ -346,7 +345,7 @@ const CALLOUT_CLOSE = /^ {0,3}:::\s*$/;
  */
 function writeFence(lang: string, text: string, context: BlockContext): string[] {
   const guarded = (line: string): boolean =>
-    FENCE_LINE.test(line) || (context.inCallout && CALLOUT_CLOSE.test(line)) || (line.startsWith(FENCE_GUARD) && endsFencedCode(line));
+    isFenceLine(line) || (context.inCallout && CALLOUT_CLOSE.test(line)) || (line.startsWith(FENCE_GUARD) && endsFencedCode(line));
   const lines = text === '' ? [] : text.split('\n').map((line) => (guarded(line) ? `${FENCE_GUARD}${line}` : line));
   return [`\`\`\`${oneLine(lang)}`, ...lines, '```'];
 }
