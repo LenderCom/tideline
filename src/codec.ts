@@ -856,9 +856,10 @@ const TRAILING_PUNCTUATION = /\s*[\p{P}\p{S}]+$/u;
 /**
  * CommonMark cannot write every span: a marker between a word and punctuation is not a delimiter, so no spelling makes
  * `(b)` italic in `a(b)c`, or bold `Note:` directly before a word. Such a span gives up what it must for the text to stay
- * exactly as typed. Text at its edge gives up the punctuation (`a(_b_)c`), and a code span or bracketed link, which cannot
- * be cut, gives up the mark. Two marks starting or ending together are one run of `*` (`x***y***z`), so the character beside
- * that run is what counts, and where it cannot work italic is given up first, as in `markableAs`.
+ * exactly as typed. Text at its edge gives up the punctuation (`a(_b_)c`), and a code span or link, which cannot be cut,
+ * gives up the mark (a bare link keeps it where its own first and last characters flank: `x*https://a.b*y`). Two marks
+ * starting or ending together are one run of `*` (`x***y***z`), so the character beside that run is what counts, and where
+ * it cannot work italic is given up first, as in `markableAs`.
  *
  * Checked with `*`, the more permissive marker: if it cannot work, `_` cannot.
  */

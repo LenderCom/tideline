@@ -173,7 +173,7 @@ const URL_TRAILING_PUNCTUATION = '.,;:!?';
  * The end is right after the scheme when no URL is left.
  */
 function bareUrlEnd(text: string, start: number, closes: (run: string, at: number) => boolean): number {
-  const part = /\\[*_]?|`[^\s<>()[\]'"`]*`|`|\*+|_+|[^\s<>()[\]'"*_\\`]+/y;
+  const part = /\\[\\*_]?|`[^\s<>()[\]'"`]*`|`|\*+|_+|[^\s<>()[\]'"*_\\`]+/y;
   const scheme = start + AUTOLINK_SCHEME.length;
   part.lastIndex = scheme;
   let end = scheme;

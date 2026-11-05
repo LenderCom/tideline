@@ -360,6 +360,8 @@ describe('parseDocInline: a bare URL in emphasis', () => {
     expect(parseDocInline('*see https://a.b/x\\* now*')).toEqual([em({ kind: 'text', text: 'see ' }, link('https://a.b/x\\*'), { kind: 'text', text: ' now' })]);
     expect(parseDocInline('*see https://a.b/`x*y` z*')).toEqual([em({ kind: 'text', text: 'see ' }, link('https://a.b/`x*y`'), { kind: 'text', text: ' z' })]);
     expect(parseDocInline('*https://a.b/`x*')).toEqual([em(link('https://a.b/`x'))]);
+    // An escaped backslash escapes no marker.
+    expect(parseDocInline('**https://a.b/x\\\\**')).toEqual([strong(link('https://a.b/x\\\\'))]);
   });
 
   it('keeps a marker in the URL when it closes nothing', () => {
