@@ -196,6 +196,16 @@ describe('codec: documented normalisations', () => {
     expect(parseDocBody(written)).toEqual([{ kind: 'code', text }]);
   });
 
+  it('cuts code at a CR where the reader does, so a fence after it is guarded and the block stays whole', () => {
+    const code = (text: string): JSONContent => ({ type: 'codeBlock', attrs: { language: null }, content: [{ type: 'text', text }] });
+    expect(docToMarkdown({ type: 'doc', content: [code('```\rfoo')] })).toBe('```\n​```\nfoo\n```');
+    expect(parseDocBody(docToMarkdown({ type: 'doc', content: [code('a\r```\r\n:::')] }))).toEqual([{ kind: 'code', text: 'a\n```\n:::' }]);
+    const inCallout: JSONContent = { type: 'doc', content: [{ type: 'callout', attrs: { kind: 'note', title: null }, content: [code('a\r:::\rb')] }] };
+    expect(parseDocBody(docToMarkdown(inCallout))).toEqual([{ kind: 'callout', callout: 'note', blocks: [{ kind: 'code', text: 'a\n:::\nb' }] }]);
+    const frontMatter: JSONContent = { type: 'doc', content: [{ type: 'codeBlock', attrs: { language: 'front-matter' }, content: [{ type: 'text', text: 'a: 1\r---\rb: 2' }] }] };
+    expect(parseDocBody(docToMarkdown(frontMatter))).toEqual([{ kind: 'code', lang: 'front-matter', text: 'a: 1\n---\nb: 2' }]);
+  });
+
   it('keeps a zero-width space typed in front of a fence-like line: the writer guards it once more', () => {
     const text = '\u200B```\n\u200B\u200B  ```js\n\u200B:::\n\u200Bplain';
     const doc: JSONContent = { type: 'doc', content: [{ type: 'codeBlock', attrs: { language: null }, content: [{ type: 'text', text }] }] };

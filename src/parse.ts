@@ -132,9 +132,17 @@ export function attachmentIdOf(ref: string): string | null {
   return /^attachment:[A-Za-z0-9_-]+$/.test(ref) ? ref.slice('attachment:'.length) : null;
 }
 
+/**
+ * A body's lines as the parser reads them: a CR, a CRLF and an LF each end a line. The writer cuts code and front matter
+ * the same way, so it guards each line the parser will see, not a line the parser will cut in two.
+ */
+export function bodyLines(body: string): string[] {
+  return body.replace(/\r\n?/g, '\n').split('\n');
+}
+
 /** Parse a page body into blocks. Total: any input renders, nothing throws. */
 export function parseDocBody(body: string, options: GrammarOptions = {}): DocBlock[] {
-  const lines = body.replace(/\r\n?/g, '\n').split('\n');
+  const lines = bodyLines(body);
   const ids = new Map<string, number>();
   const close = frontMatterEnd(lines);
   if (close < 0) return parseBlocks(lines, ids, options, 0);

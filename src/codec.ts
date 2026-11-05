@@ -1,6 +1,6 @@
 import type { JSONContent } from '@tiptap/core';
 import { canCloseEmphasis, canOpenEmphasis, charAt, charBefore, isDelimiterRow, isPunctuationChar, isSpaceChar, type TableAlign } from './inline.js';
-import { endsFencedCode, FENCE_GUARD, FRONT_MATTER_KEY, isFenceLine, FRONT_MATTER_LANG, parseDocBody, parseDocInline, type DocBlock, type DocCalloutKind, type DocInline, type DocListItem } from './parse.js';
+import { bodyLines, endsFencedCode, FENCE_GUARD, FRONT_MATTER_KEY, isFenceLine, FRONT_MATTER_LANG, parseDocBody, parseDocInline, type DocBlock, type DocCalloutKind, type DocInline, type DocListItem } from './parse.js';
 import { tokenMatcher, type GrammarOptions, type MarkdownPlugin } from './plugin.js';
 
 /**
@@ -346,14 +346,15 @@ const CALLOUT_CLOSE = /^ {0,3}:::\s*$/;
 function writeFence(lang: string, text: string, context: BlockContext): string[] {
   const guarded = (line: string): boolean =>
     isFenceLine(line) || (context.inCallout && CALLOUT_CLOSE.test(line)) || (line.startsWith(FENCE_GUARD) && endsFencedCode(line));
-  const lines = text === '' ? [] : text.split('\n').map((line) => (guarded(line) ? `${FENCE_GUARD}${line}` : line));
+  // Cut where the parser will: a CR in the code ends a line there too, so the line after it may be the fence to guard.
+  const lines = text === '' ? [] : bodyLines(text).map((line) => (guarded(line) ? `${FENCE_GUARD}${line}` : line));
   return [`\`\`\`${oneLine(lang)}`, ...lines, '```'];
 }
 
 /** Front matter back between its `---` lines, when that reads back as the same block. Anything else is an ordinary fence. */
 function writeFrontMatter(node: JSONContent): string[] | null {
   if (node.type !== 'codeBlock' || node.attrs?.language !== FRONT_MATTER_LANG) return null;
-  const lines = plainText(node.content).split('\n');
+  const lines = bodyLines(plainText(node.content));
   if (!FRONT_MATTER_KEY.test(lines[0]) || lines.some((line) => line.trimEnd() === '---')) return null;
   return ['---', ...lines, '---'];
 }
