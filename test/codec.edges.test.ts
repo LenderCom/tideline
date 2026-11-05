@@ -4,6 +4,10 @@ import { leaves, trimLeaves } from '../src/codec.js';
 import type { DocInline } from '../src/parse.js';
 import { docToMarkdown, editorInlineLeaves, markdownToDoc, parseDocBody } from './grammar.js';
 import { mergeMarkdown } from '../src/merge.js';
+import { docToMarkdown as writeWith, markdownToDoc as readWith } from '../src/codec.js';
+import { parseDocInline as parseDocInlineWith } from '../src/parse.js';
+import { parseInline } from '../src/inline.js';
+import type { MarkdownPlugin } from '../src/plugin.js';
 
 /**
  * The codec's edges: shapes the property generators reach rarely or never, pinned one by one so each stays
@@ -43,6 +47,18 @@ describe('codec: reading', () => {
     ]);
     expect(markdownToDoc(docToMarkdown(read))).toEqual(read);
     expect(markdownToDoc('``x`').content?.[0].content).toEqual([{ type: 'text', text: '``x`' }]);
+  });
+
+  it('reads a plugin token that starts with a backtick nothing closes, before the run reads as backticks', () => {
+    const tick: MarkdownPlugin = { type: 'tick', pattern: '`[a-z]+!', read: (token) => ({ name: token.slice(1, -1) }), write: (attrs) => `\`${String(attrs.name)}!` };
+    const plugins = [tick];
+    const atom = { kind: 'atom', type: 'tick', attrs: { name: 'abc' }, text: '`abc!' };
+    expect(parseInline('see `abc! now', { plugins })).toEqual([{ kind: 'text', text: 'see ' }, atom, { kind: 'text', text: ' now' }]);
+    expect(parseDocInlineWith('see `abc! now', { plugins })).toEqual([{ kind: 'text', text: 'see ' }, atom, { kind: 'text', text: ' now' }]);
+    const doc = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'a`' }, { type: 'tick', attrs: { name: 'abc' } }, { type: 'text', text: ' b' }] }] };
+    expect(readWith(writeWith(doc, { plugins }), { plugins })).toEqual(doc);
+    // A run the token does not start at is still read whole, so none of its backticks opens the token or a span.
+    expect(parseInline('``abc!', { plugins })).toEqual([{ kind: 'text', text: '``abc!' }]);
   });
 
   it('reads an empty quote and an empty callout with a paragraph to type into', () => {
